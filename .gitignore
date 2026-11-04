@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+*.o
+build/
+.vscode/
+.DS_Store
+# Keil course project used for testing (third-party material)
+01_SVC/
