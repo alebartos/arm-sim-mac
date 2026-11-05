@@ -1054,6 +1054,35 @@ func runKeilListingTests() throws -> String? {
     return problems.isEmpty ? nil : problems.joined(separator: "\n      ")
 }
 
+/// armlink-style .map of an assembly-only template must match Keil's, except the tool name,
+/// armlink's BuildAttributes$$ symbol and the Debug column (our DWARF differs).
+func runKeilMapTest(project: String, source: String, map: String) throws -> String? {
+    let display = source.replacingOccurrences(of: "/", with: "\\")
+    let output = ArmasmAssembler.assemble(fileAt: "templates/\(project)/\(source)",
+                                          options: .init(listing: (displayPath: display, commandLine: "")))
+    guard let object = output.object else { return "assembly failed" }
+    let name = (source as NSString).deletingPathExtension.components(separatedBy: "/").last! + ".o"
+    let image = try Linker.link(objects: [(name: name, bytes: object)],
+                                layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000),
+                                options: LinkOptions(removeUnused: true, entry: "Reset_Handler"))
+    func clean(_ text: String) -> [String] {
+        text.replacingOccurrences(of: "\r", with: "").components(separatedBy: "\n")
+            .filter { !$0.hasPrefix("Component:") && !$0.contains("BuildAttributes$$") }
+            .map { line in
+                // Drop the Debug column of the size tables.
+                guard let r = line.range(of: #" +\d+   (\S+\.o|Object Totals|Grand Totals|ELF Image Totals)$"#, options: .regularExpression)
+                else { return line }
+                return String(line[..<r.lowerBound])
+            }
+    }
+    let keil = clean(try String(contentsOfFile: "templates/\(project)/Listings/\(map)", encoding: .isoLatin1))
+    let ours = clean(image.linkMap?.render() ?? "")
+    for (i, (a, b)) in zip(ours, keil).enumerated() where a != b {
+        return "line \(i + 1):\n        ours '\(a)'\n        Keil '\(b)'"
+    }
+    return ours.count == keil.count ? nil : "length \(ours.count) lines, Keil \(keil.count)"
+}
+
 /// Exercises the armasm features clang never sees: macros, WHILE, SETA, numeric labels, pools.
 let armasmFeatureProgram = """
                 GBLA    count
@@ -1198,6 +1227,12 @@ if FileManager.default.fileExists(atPath: "templates/01_SVC/Objects/SVC.axf") {
 }
 if FileManager.default.fileExists(atPath: "templates") {
     report("[M3] native: Keil .lst listings of templates/ reproduced line by line") { try runKeilListingTests() }
+    report("[M3] linker: 01_SVC .map matches armlink's") {
+        try runKeilMapTest(project: "01_SVC", source: "Source/template.s", map: "SVC.map")
+    }
+    report("[M3] linker: 00_ASM_template .map matches armlink's") {
+        try runKeilMapTest(project: "00_ASM_template", source: "Source/startup.s", map: "ASM_template.map")
+    }
 }
 // PoliTo course templates (templates/, not in git): assembly-only projects with a Keil-built .axf.
 for (source, axf) in [("templates/00_ASM_template/Source/startup.s", "templates/00_ASM_template/Objects/ASM_template.axf")]

@@ -211,8 +211,16 @@ final class BuildSystem {
         let axfURL = objectsDir.appendingPathComponent(project.options.outputName + ".axf")
         do {
             let inputs = try objects.map { (name: $0.url.lastPathComponent, bytes: [UInt8](try Data(contentsOf: $0.url))) }
-            let image = try Linker.link(objects: inputs, layout: project.options.layout)
+            // Like armlink in µVision: --entry Reset_Handler, unused sections removed, map in the listings folder.
+            let image = try Linker.link(objects: inputs, layout: project.options.layout,
+                                        options: LinkOptions(removeUnused: true, entry: "Reset_Handler"))
             try Data(ELFWriter.write(image)).write(to: axfURL)
+            if let map = image.linkMap {
+                let listingsDir = projectDir.appendingPathComponent(outputFolder.hasPrefix("ARMSim_") ? "ARMSim_Listings" : "Listings")
+                try? FileManager.default.createDirectory(at: listingsDir, withIntermediateDirectories: true)
+                try? map.render().write(to: listingsDir.appendingPathComponent(project.options.outputName + ".map"),
+                                        atomically: true, encoding: .utf8)
+            }
 
             var size = ProgramSize()
             for segment in image.segments {

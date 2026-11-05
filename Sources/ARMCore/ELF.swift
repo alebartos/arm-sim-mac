@@ -35,6 +35,8 @@ public struct ELFImage: Sendable {
     public var sectionAddresses: [[String: UInt32]] = []
     /// ARM mapping symbols ($t = Thumb code, $d = data) used by disassemblers.
     public var mappingSymbols: [MappingSymbol] = []
+    /// For linked objects: what went where, for the .map file.
+    public var linkMap: LinkMap?
 
     public func symbol(named name: String) -> ELFSymbol? {
         symbols.first { $0.name == name }

@@ -29,23 +29,26 @@ public enum Linker {
     /// Section names treated as the vector table (placed at the start of ROM).
     static let vectorSectionNames: Set<String> = [".isr_vector", ".vectors", ".vector_table", "RESET", "vectors"]
 
-    public static func link(objects: [(name: String, bytes: [UInt8])], layout: LinkLayout) throws -> ELFImage {
+    public static func link(objects: [(name: String, bytes: [UInt8])], layout: LinkLayout,
+                            options: LinkOptions = LinkOptions()) throws -> ELFImage {
         let parsed = try objects.map { item -> ObjectFile in
             let object = try ObjectFile(name: item.name, bytes: item.bytes)
             guard object.type == 1 else { throw ELFError.unsupported("\(item.name) is not a relocatable object") }
             return object
         }
-        return try link(objects: parsed, layout: layout)
+        return try link(objects: parsed, layout: layout, options: options)
     }
 
-    static func link(objects: [ObjectFile], layout: LinkLayout) throws -> ELFImage {
+    static func link(objects: [ObjectFile], layout: LinkLayout, options: LinkOptions = LinkOptions()) throws -> ELFImage {
         struct Placed { let object: Int; let section: Int }
+        let (liveSet, crossReferences) = liveSections(objects, entry: options.entry)
+        let live: Set<SectionKey>? = options.removeUnused ? liveSet : nil
 
         // 1. Classify and order sections.
         var vectors: [Placed] = [], code: [Placed] = [], rodata: [Placed] = [], data: [Placed] = [], bss: [Placed] = []
         var fixed: [(Placed, UInt32)] = []
         for (oi, object) in objects.enumerated() {
-            for (si, s) in object.sections.enumerated() where object.isLoadable(s) {
+            for (si, s) in object.sections.enumerated() where object.isLoadable(s) && (live?.contains(key(oi, si)) ?? true) {
                 let p = Placed(object: oi, section: si)
                 if let address = fixedAddress(of: s.name) {
                     fixed.append((p, address))
@@ -237,12 +240,15 @@ public enum Linker {
         }
         mapping.sort { $0.address < $1.address }
 
-        let entryNames = ["Reset_Handler", "_start", "main"]
+        let entryNames = (options.entry.map { [$0] } ?? []) + ["Reset_Handler", "_start", "main"]
         let entry = entryNames.lazy.compactMap { name in symbols.first { $0.name == name }?.address }.first
             ?? segments.first?.address ?? layout.romBase
         var image = ELFImage(entry: entry, segments: segments, symbols: symbols, wasRelocatable: true)
         image.sectionAddresses = sectionAddresses
         image.mappingSymbols = mapping
+        let entrySymbol = symbols.first { $0.address == entry && $0.isFunction }
+        image.linkMap = buildMap(objects: objects, addresses: addresses, live: live, crossReferences: crossReferences,
+                                 entry: entry | (entrySymbol?.isThumb ?? true ? 1 : 0), layout: layout, image: image)
         return image
     }
 

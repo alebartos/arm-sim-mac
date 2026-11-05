@@ -1439,7 +1439,9 @@ private final class Assembly: ExprEnvironment {
                 var target = start
                 while (target - offset) % alignment != 0 { target += 1 }
                 if emit && target > start && !areas[area].isNoInit {
-                    // armasm pads ALIGN with zeros, also in code areas (Keil listings: "00 00  ALIGN").
+                    // armasm pads ALIGN with zeros, also in code areas (Keil listings: "00 00  ALIGN"),
+                    // and marks the padding as data ($d; armlink counts it in "inc. data").
+                    mark(area, data: true)
                     sectionBytes[area] += [UInt8](repeating: 0, count: target - start)
                     statementBytes[index] = [UInt8](repeating: 0, count: target - start)
                 }
@@ -1530,7 +1532,13 @@ private final class Assembly: ExprEnvironment {
             var bind: UInt8 = 0
             if let weak = exports[name] { bind = weak ? 2 : 1 }
             let value = UInt32(s.offset) | (isCode ? 1 : 0)
-            symbols.append(ObjectSymbol(name: name, value: value, size: UInt32(procSizes[name] ?? 0),
+            // Data labels get the size of the directive on their line (armasm: Stack_Mem SPACE 256 -> 256).
+            var dataSize = 0
+            switch s.kind {
+            case .data, .instruction, .literalLoad, .it: dataSize = s.size   // label on a statement: its size
+            default: break
+            }
+            symbols.append(ObjectSymbol(name: name, value: value, size: UInt32(procSizes[name] ?? dataSize),
                                         type: isCode ? 2 : 1, bind: bind, section: s.area))
             defined.insert(name)
         }
@@ -1579,7 +1587,7 @@ private final class Assembly: ExprEnvironment {
         }
         do {
             return try ELFObjectWriter.write(sections: sections, symbols: symbols,
-                                             fileName: (files[0] as NSString).lastPathComponent)
+                                             fileName: options.listing?.displayPath ?? (files[0] as NSString).lastPathComponent)
         } catch {
             diagnostics.append(ArmasmDiagnostic(file: files[0], line: 0, message: "\(error)", isError: true))
             return nil
