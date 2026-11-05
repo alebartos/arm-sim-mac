@@ -17,6 +17,7 @@ usage: armsim [options] <program.elf | program.o | program.bin>
   --rom <base:size>      ROM (IROM1) for linking several objects, e.g. 0x0:0x80000
   --ram <base:size>      RAM (IRAM1) for linking several objects, e.g. 0x10000000:0x8000
   --translate <file.s>   print the GNU-syntax translation of a Keil armasm file and exit
+  --list <file.lst>      with --assemble (given before it): also write a Keil-style listing
   --assemble <in.s> <out.o>  assemble a Keil armasm file with the native assembler and exit
 
 Default start: .o files call `_start`/`main`/first symbol and return to a trap;
@@ -45,6 +46,7 @@ func parseArea(_ text: String) -> (UInt32, UInt32)? {
     return (a, b)
 }
 var axfPath: String?
+var listPath: String?
 var arch = Architecture.armv7m
 var entrySymbol: String?
 var forceReset = false
@@ -98,6 +100,7 @@ while !arguments.isEmpty {
             FileHandle.standardError.write(Data("\(file):\(d.line): \(d.isError ? "error" : "warning"): \(d.message)\n".utf8))
         }
         exit(result.diagnostics.contains { $0.isError } ? 1 : 0)
+    case "--list": listPath = value()
     case "--encode":
         // One instruction per stdin line -> halfwords (like a Keil listing) or "ERR <message>".
         while let line = readLine() {
@@ -114,7 +117,15 @@ while !arguments.isEmpty {
     case "--assemble":
         // --assemble <file.s> <out.o>: native armasm assembler (respects a preceding --cpu).
         let file = value(), out = value()
-        let result = ArmasmAssembler.assemble(fileAt: file, options: .init(arch: arch))
+        let cpuName = ["armv6m": "Cortex-M0", "armv7m": "Cortex-M3", "armv7em": "Cortex-M4"][arch.rawValue] ?? "Cortex-M3"
+        let listing = listPath.map { _ in
+            (displayPath: file.replacingOccurrences(of: "/", with: "\\"),
+             commandLine: "--debug --xref --cpu=\(cpuName) --list=\(listPath!) \(file.replacingOccurrences(of: "/", with: "\\"))")
+        }
+        let result = ArmasmAssembler.assemble(fileAt: file, options: .init(arch: arch, listing: listing))
+        if let listPath, let text = result.listingText {
+            try? text.write(toFile: listPath, atomically: true, encoding: .utf8)
+        }
         for d in result.diagnostics {
             FileHandle.standardError.write(Data("\(d.file):\(d.line): \(d.isError ? "error" : "warning"): \(d.message)\n".utf8))
         }

@@ -1015,6 +1015,45 @@ func runKeilConfirmed() throws -> String? {
     return problems.isEmpty ? nil : problems.joined(separator: "\n      ")
 }
 
+/// Keil .lst listings in templates/ (not in git) must be reproduced line by line; only the
+/// "Command Line" block and the "N symbols in table" total (Keil counts its built-in symbols) differ.
+func runKeilListingTests() throws -> String? {
+    let root = URL(fileURLWithPath: "templates")
+    guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return nil }
+    func normalized(_ text: String) -> [String] {
+        var lines = text.replacingOccurrences(of: "\r", with: "").components(separatedBy: "\n")
+        if let start = lines.firstIndex(where: { $0.hasPrefix("Command Line:") }),
+           let end = lines[start...].firstIndex(where: { $0.isEmpty }) {
+            lines.removeSubrange(start..<end)
+        }
+        return lines.filter { !$0.hasSuffix("symbols in table") }
+    }
+    var checked = 0
+    var problems: [String] = []
+    for case let url as URL in walker where url.pathExtension == "lst" && url.deletingLastPathComponent().lastPathComponent == "Listings"
+        && !url.path.contains("zipped") {
+        let project = url.deletingLastPathComponent().deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent.lowercased()
+        guard let files = FileManager.default.enumerator(at: project, includingPropertiesForKeys: nil),
+              let source = (files.compactMap { $0 as? URL }).first(where: {
+                  $0.pathExtension == "s" && $0.deletingPathExtension().lastPathComponent.lowercased() == stem
+              }) else { continue }
+        let relative = String(source.path.dropFirst(project.path.count + 1)).replacingOccurrences(of: "/", with: "\\")
+        let output = ArmasmAssembler.assemble(fileAt: source.path,
+                                              options: .init(listing: (displayPath: relative, commandLine: "")))
+        guard let ours = output.listingText, let keil = try? String(contentsOf: url, encoding: .isoLatin1) else {
+            problems.append("\(url.lastPathComponent): no listing"); continue
+        }
+        let a = normalized(ours), b = normalized(keil)
+        checked += 1
+        if let i = zip(a, b).enumerated().first(where: { $0.element.0 != $0.element.1 })?.offset ?? (a.count != b.count ? min(a.count, b.count) : nil) {
+            problems.append("\(project.lastPathComponent)/\(url.lastPathComponent) line \(i + 1):\n        ours '\(i < a.count ? a[i] : "<end>")'\n        Keil '\(i < b.count ? b[i] : "<end>")'")
+        }
+    }
+    if checked == 0 { return nil }
+    return problems.isEmpty ? nil : problems.joined(separator: "\n      ")
+}
+
 /// Exercises the armasm features clang never sees: macros, WHILE, SETA, numeric labels, pools.
 let armasmFeatureProgram = """
                 GBLA    count
@@ -1156,6 +1195,9 @@ report("[M3] native: \(keilConfirmed.count + 1) encodings confirmed by Keil list
 report("[M3] native: macros, WHILE, IF, local labels, literal pools, implicit IT") { try runArmasmFeatureTest() }
 if FileManager.default.fileExists(atPath: "templates/01_SVC/Objects/SVC.axf") {
     report("[M3] native: 01_SVC template links byte-identical to Keil's SVC.axf") { try runKeilTemplateTest() }
+}
+if FileManager.default.fileExists(atPath: "templates") {
+    report("[M3] native: Keil .lst listings of templates/ reproduced line by line") { try runKeilListingTests() }
 }
 // PoliTo course templates (templates/, not in git): assembly-only projects with a Keil-built .axf.
 for (source, axf) in [("templates/00_ASM_template/Source/startup.s", "templates/00_ASM_template/Objects/ASM_template.axf")]

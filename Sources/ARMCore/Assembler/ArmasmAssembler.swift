@@ -23,12 +23,17 @@ public enum ArmasmAssembler {
         public var predefines: [String]
         public var includePaths: [String]
         public var debugInfo: Bool
+        /// Produce a Keil-style listing (`Output.listingText`): source path as shown in it
+        /// (e.g. "Source\\template.s") and the command line printed at its end.
+        public var listing: (displayPath: String, commandLine: String)?
 
-        public init(arch: Architecture = .armv7m, predefines: [String] = [], includePaths: [String] = [], debugInfo: Bool = true) {
+        public init(arch: Architecture = .armv7m, predefines: [String] = [], includePaths: [String] = [], debugInfo: Bool = true,
+                    listing: (displayPath: String, commandLine: String)? = nil) {
             self.arch = arch
             self.predefines = predefines
             self.includePaths = includePaths
             self.debugInfo = debugInfo
+            self.listing = listing
         }
     }
 
@@ -47,6 +52,8 @@ public enum ArmasmAssembler {
         public var object: [UInt8]?
         public var diagnostics: [ArmasmDiagnostic]
         public var listing: [ListingRow] = []
+        /// Keil-style .lst text (CRLF line endings) when `Options.listing` is set.
+        public var listingText: String?
         public var errorCount: Int { diagnostics.filter(\.isError).count }
     }
 
@@ -71,6 +78,8 @@ private struct SourceLine {
     var file: Int
     var line: Int
     var text: String
+    /// First physical lines of a "\\" continued statement (the statement takes the last line's number, as armasm).
+    var continued = false
 }
 
 private enum Variable {
@@ -100,6 +109,8 @@ private struct Literal {
     var key: String
     var expression: String
     var label: String
+    /// Line of the first LDR =expr using it (cross reference).
+    var useLine = 0
 }
 
 private enum StatementKind {
@@ -125,6 +136,8 @@ private struct Statement {
     var procLabel: String?
     var inIT = false
     var implicitIT: (pattern: String, condition: Int)?
+    /// Main-file line this statement is listed under (macro/WHILE expansions: the invoking line).
+    var listLine = 0
     // Layout
     var offset: Int = 0
     var size: Int = 0
@@ -144,7 +157,7 @@ private final class Assembly: ExprEnvironment {
 
     var labels: [String: Int] = [:]               // label -> statement index
     var labelOrder: [String] = []
-    var equates: [String: (text: String, statement: Int)] = [:]
+    var equates: [String: (text: String, statement: Int, line: Int)] = [:]
     var variables: [String: Variable] = [:]
     var registerAliases: [String: Int] = [:]
     var exports: [String: Bool] = [:]             // name -> weak
@@ -155,6 +168,22 @@ private final class Assembly: ExprEnvironment {
     var mapCounter: Int64 = 0
     var ended = false
     var literalLabels: [String: (statement: Int, index: Int)] = [:]
+
+    // Listing / cross reference (main file only)
+    var sourceText: [String] = []
+    var listingLines: [(line: Int, firstStatement: Int, area: Int)] = []
+    var listedLines = Set<Int>()
+    var endLine: Int?
+    var expansionLine = 0
+    var useLineOverride: Int?
+    var symbolUses: [String: Set<Int>] = [:]
+    var importLines: [String: Int] = [:]
+    var areaLines: [Int: Int] = [:]
+    var equLines: [Int: String] = [:]
+    var rnLines: [Int: Int] = [:]
+    var statementBytes: [Int: [UInt8]] = [:]
+    var recordingUses = true
+    var expanding = true
 
     // Evaluation context
     var evalStatement = 0
@@ -177,6 +206,8 @@ private final class Assembly: ExprEnvironment {
     // MARK: Driver
 
     func run(source: String, path: String) -> ArmasmAssembler.Output {
+        sourceText = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
         files.append(path.hasPrefix("/") ? path
                      : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path))
         for define in options.predefines {
@@ -191,6 +222,7 @@ private final class Assembly: ExprEnvironment {
         }
         expand(lines: Self.logicalLines(source, file: 0), depth: 0)
         flushAllPools()
+        expanding = false
         guard diagnostics.allSatisfy({ !$0.isError }) else {
             return .init(object: nil, diagnostics: diagnostics)
         }
@@ -200,8 +232,10 @@ private final class Assembly: ExprEnvironment {
             return .init(object: nil, diagnostics: diagnostics)
         }
         let object = emit()
-        return .init(object: diagnostics.contains(where: \.isError) ? nil : object, diagnostics: diagnostics,
-                     listing: listing)
+        var result = ArmasmAssembler.Output(object: diagnostics.contains(where: \.isError) ? nil : object,
+                                            diagnostics: diagnostics, listing: listing)
+        if let l = options.listing { result.listingText = renderListing(displayPath: l.displayPath, commandLine: l.commandLine) }
+        return result
     }
 
     // MARK: Lexing
@@ -213,12 +247,12 @@ private final class Assembly: ExprEnvironment {
         var i = 0
         while i < raw.count {
             var text = codePart(raw[i])
-            let first = i
             while text.hasSuffix("\\") && i + 1 < raw.count {
+                result.append(SourceLine(file: file, line: i + 1, text: "", continued: true))
                 i += 1
                 text = String(text.dropLast()) + codePart(raw[i])
             }
-            result.append(SourceLine(file: file, line: first + 1, text: text))
+            result.append(SourceLine(file: file, line: i + 1, text: text))
             i += 1
         }
         return result
@@ -376,6 +410,13 @@ private final class Assembly: ExprEnvironment {
         while i < lines.count && !ended {
             let source = lines[i]
             i += 1
+            // armasm lists a line only when assembly was active before it (lines of a false IF branch,
+            // and the ELSE that ends one, are left out).
+            if active && depth == 0 && source.file == 0 && !source.continued && !listedLines.contains(source.line) {
+                listedLines.insert(source.line)
+                listingLines.append((source.line, statements.count, currentArea))
+            }
+            if depth == 0 && source.file == 0 { expansionLine = source.line }
             let code = source.text
             let (rawLabel0, opcode0, _) = Self.split(code)
             let upper0 = opcode0?.uppercased() ?? ""
@@ -520,6 +561,7 @@ private final class Assembly: ExprEnvironment {
                 continue
             case "END":
                 ended = true
+                if source.file == 0 { endLine = expansionLine }
                 continue
             default:
                 break
@@ -581,6 +623,7 @@ private final class Assembly: ExprEnvironment {
 
     func append(_ statement: Statement) {
         var s = statement
+        s.listLine = expansionLine
         if let raw = s.label {
             if let digits = Int(raw.prefix(while: { $0.isNumber })), raw.first?.isNumber == true {
                 numericCounter += 1
@@ -657,18 +700,20 @@ private final class Assembly: ExprEnvironment {
             guard let label else { error(source.file, source.line, "EQU needs a name"); return }
             guard labels[label] == nil, equates[label] == nil else { error(source.file, source.line, "symbol '\(label)' is already defined"); return }
             let parts = Self.splitList(operands)
-            equates[label] = (parts.first ?? "", statements.count)
+            equates[label] = (parts.first ?? "", statements.count, expansionLine)
+            equLines[expansionLine] = label
         case "RN":
             guard let label else { return }
-            if let r = parseRegister(operands) { registerAliases[label.uppercased()] = r }
+            if let r = parseRegister(operands) { registerAliases[label.uppercased()] = r; rnLines[expansionLine] = r }
             else if let v = evaluateNow(operands, file: source.file, line: source.line), v.isConstant, (0...15).contains(v.constant) {
                 registerAliases[label.uppercased()] = Int(v.constant)
+                rnLines[expansionLine] = Int(v.constant)
             } else { error(source.file, source.line, "RN needs a register") }
         case "MAP", "^":
             let parts = Self.splitList(operands)
             if let v = evaluateNow(parts.first ?? "0", file: source.file, line: source.line), v.isConstant { mapCounter = v.constant }
         case "FIELD", "#":
-            if let label { equates[label] = (String(mapCounter), statements.count) }
+            if let label { equates[label] = (String(mapCounter), statements.count, expansionLine) }
             if let v = evaluateNow(operands.isEmpty ? "0" : operands, file: source.file, line: source.line), v.isConstant {
                 mapCounter += v.constant
             }
@@ -680,6 +725,7 @@ private final class Assembly: ExprEnvironment {
             let names = operands.components(separatedBy: "[").first ?? operands
             for n in Self.splitList(names) where !n.isEmpty {
                 exports[Self.unbar(n)] = isWeak
+                symbolUses[Self.unbar(n), default: []].insert(expansionLine)
             }
             if let label { plain(.labelOnly) }
         case "IMPORT", "EXTERN":
@@ -687,6 +733,7 @@ private final class Assembly: ExprEnvironment {
             let names = operands.components(separatedBy: "[").first ?? operands
             for n in Self.splitList(names) where !n.isEmpty {
                 imports[Self.unbar(n)] = isWeak
+                importLines[Self.unbar(n)] = importLines[Self.unbar(n)] ?? expansionLine
             }
         case "PRESERVE8", "REQUIRE8", "ENTRY", "KEEP", "ROUT", "ATTR", "EXPORTAS", "FRAME", "THUMB", "CODE16",
              "REQUIRE", "OPT", "TTL", "SUBT":
@@ -771,6 +818,7 @@ private final class Assembly: ExprEnvironment {
         let isCode = attributes.contains("CODE")
         let isNoInit = attributes.contains("NOINIT")
         let isWritable = !isCode && !attributes.contains("READONLY")
+        areaLines[areas.count] = expansionLine
         areas.append(Area(name: name, isCode: isCode, isWritable: isWritable,
                           isNoInit: isNoInit, alignment: alignment))
         currentArea = areas.count - 1
@@ -811,7 +859,7 @@ private final class Assembly: ExprEnvironment {
             literalLabel = existing.label
         } else {
             literalLabel = "$lit\(currentArea).\(area.poolCount).\(area.pendingLiterals.count)"
-            area.pendingLiterals.append(Literal(key: key, expression: expression, label: literalLabel))
+            area.pendingLiterals.append(Literal(key: key, expression: expression, label: literalLabel, useLine: expansionLine))
         }
         areas[currentArea] = area
         append(Statement(file: source.file, line: source.line, label: label,
@@ -824,7 +872,9 @@ private final class Assembly: ExprEnvironment {
         areas[area].pendingLiterals = []
         areas[area].poolCount += 1
         for (k, lit) in literals.enumerated() { literalLabels[lit.label] = (statements.count, k) }
-        statements.append(Statement(file: source.file, line: source.line, label: nil, kind: .pool(literals), area: area))
+        var pool = Statement(file: source.file, line: source.line, label: nil, kind: .pool(literals), area: area)
+        pool.listLine = expansionLine
+        statements.append(pool)
     }
 
     func flushAllPools() {
@@ -834,16 +884,29 @@ private final class Assembly: ExprEnvironment {
 
     // MARK: Expression environment
 
+    func noteUse(_ name: String) {
+        guard recordingUses else { return }
+        let line: Int
+        if let o = useLineOverride { line = o }
+        else if expanding { line = expansionLine }
+        else if evalStatement < statements.count { line = statements[evalStatement].listLine }
+        else { line = expansionLine }
+        if line > 0 { symbolUses[name, default: []].insert(line) }
+    }
+
     func value(of name: String) throws -> ExprValue? {
-        if let index = labels[name] { return labelValue(index, name: name) }
+        if let index = labels[name] { noteUse(name); return labelValue(index, name: name) }
         if let (statement, k) = literalLabels[name] {
             let s = statements[statement]
             return ExprValue(constant: Int64(s.offset + 4 * k), terms: ["§\(s.area)": 1], representative: name)
         }
         if let equ = equates[name] {
             guard !evaluating.contains(name) else { throw AsmError("circular definition of '\(name)'") }
+            noteUse(name)
             evaluating.insert(name)
-            defer { evaluating.remove(name) }
+            let savedOverride = useLineOverride
+            useLineOverride = equ.line
+            defer { evaluating.remove(name); useLineOverride = savedOverride }
             let saved = evalStatement
             evalStatement = equ.statement
             defer { evalStatement = saved }
@@ -856,7 +919,7 @@ private final class Assembly: ExprEnvironment {
             case .string(let s): return ExprValue(string: s)
             }
         }
-        if imports[name] != nil { return ExprValue(constant: 0, terms: [name: 1], representative: name) }
+        if imports[name] != nil { noteUse(name); return ExprValue(constant: 0, terms: [name: 1], representative: name) }
         return nil
     }
 
@@ -1317,6 +1380,7 @@ private final class Assembly: ExprEnvironment {
                 if let e = encodeInstruction(index, emitErrors: emit) {
                     s.size = e.bytes.count
                     if emit {
+                        statementBytes[index] = e.bytes
                         list(s, e.bytes, code: true)
                         sectionBytes[area] += e.bytes
                         for f in e.fixups {
@@ -1349,6 +1413,7 @@ private final class Assembly: ExprEnvironment {
                     if emit && !areas[area].isNoInit {
                         if size > 0 { mark(area, data: !(directive == "DCI")) }
                         sectionBytes[area] += bytes
+                        if directive != "SPACE" && directive != "FILL" { statementBytes[index] = bytes }
                         if size > 0 { list(s, bytes, code: false) }
                         for r in relocations { sectionRelocations[area].append((s.offset + r.offset, r.type, r.value)) }
                     }
@@ -1376,6 +1441,7 @@ private final class Assembly: ExprEnvironment {
                 if emit && target > start && !areas[area].isNoInit {
                     // armasm pads ALIGN with zeros, also in code areas (Keil listings: "00 00  ALIGN").
                     sectionBytes[area] += [UInt8](repeating: 0, count: target - start)
+                    statementBytes[index] = [UInt8](repeating: 0, count: target - start)
                 }
                 s.padding = target - start
                 cursor[area] = target
@@ -1388,8 +1454,13 @@ private final class Assembly: ExprEnvironment {
                 statements[index] = s
                 if emit {
                     mark(area, data: true)
+                    let poolStart = sectionBytes[area].count
+                    defer { statementBytes[index] = Array(sectionBytes[area][poolStart...]) }
                     for lit in literals {
                         evalStatement = index
+                        let savedOverride = useLineOverride
+                        useLineOverride = lit.useLine
+                        defer { useLineOverride = savedOverride }
                         do {
                             let v = try evaluateValue(lit.expression)
                             switch v {
@@ -1697,5 +1768,253 @@ extension ArmasmAssembler {
         let output = assembly.run(source: "  AREA |.text|, CODE, READONLY\n  \(line)\n", path: "line.s")
         if let error = output.diagnostics.first(where: \.isError) { throw AsmError(error.message) }
         return assembly.sectionBytes.first ?? []
+    }
+}
+
+// MARK: - Keil-style listing (.lst)
+//
+// Layout reproduced from armasm listings: "%5d %08X " then the code bytes (Thumb halfwords two per
+// row, data words one per row, other data three bytes per row; extra rows start at column 14), the
+// label at column 23, the opcode at column 31 and the operands at column 48. Rows wrap at 79
+// columns (comments continue at column 60, or 23 on comment-only lines). 59 rows per page, then
+// the command line and the cross reference grouped by AREA.
+
+extension Assembly {
+    private enum ByteStyle { case halfwords, words, bytes }
+
+    private func chunks(_ bytes: [UInt8], _ style: ByteStyle) -> [String] {
+        switch style {
+        case .halfwords:
+            let hw = stride(from: 0, to: bytes.count - 1, by: 2).map {
+                String(format: "%04X", UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8)
+            }
+            return stride(from: 0, to: hw.count, by: 2).map { hw[$0..<min($0 + 2, hw.count)].joined(separator: " ") }
+        case .words:
+            return stride(from: 0, to: bytes.count, by: 4).map { k in
+                let w = (0..<min(4, bytes.count - k)).reduce(UInt32(0)) { $0 | UInt32(bytes[k + $1]) << (8 * $1) }
+                return String(format: "%08X", w)
+            }
+        case .bytes:
+            let b = bytes.map { String(format: "%02X", $0) }
+            return stride(from: 0, to: b.count, by: 3).map { b[$0..<min($0 + 3, b.count)].joined(separator: " ") }
+        }
+    }
+
+    private func style(of s: Statement) -> ByteStyle {
+        switch s.kind {
+        case .instruction, .literalLoad, .it: return .halfwords
+        case .pool: return .words
+        case .data(let d, _):
+            switch d {
+            case "DCD", "DCDU", "DCQ", "DCQU": return .words
+            case "DCI": return .halfwords
+            default: return .bytes
+            }
+        default: return .bytes
+        }
+    }
+
+    /// label / opcode / operands / comment of a raw source line.
+    private func pieces(_ raw: String) -> (label: String?, opcode: String?, operands: String, comment: String?) {
+        var inString = false
+        var cut: String.Index?
+        var i = raw.startIndex
+        while i < raw.endIndex {
+            let c = raw[i]
+            if c == "\"" { inString.toggle() }
+            else if c == "'" && !inString, let a = raw.index(i, offsetBy: 2, limitedBy: raw.endIndex),
+                    a < raw.endIndex, raw[a] == "'" {
+                i = raw.index(after: a)
+                continue
+            } else if c == ";" && !inString { cut = i; break }
+            i = raw.index(after: i)
+        }
+        let code = String(raw[..<(cut ?? raw.endIndex)]).replacingOccurrences(of: "\t", with: " ")
+        var comment = cut.map { String(raw[$0...]).replacingOccurrences(of: "\t", with: " ") }
+        var trimmedCode = code
+        while let last = trimmedCode.last, last.isWhitespace { trimmedCode.removeLast() }
+        let (label, opcode, operands) = Self.split(trimmedCode)
+        return (label, opcode, operands, comment)
+    }
+
+    private func pad(_ s: String, _ column: Int) -> String {
+        s.count >= column ? s : s + String(repeating: " ", count: column - s.count)
+    }
+
+    /// Wrap at 79 columns like armasm: a row that reaches column 79 always continues on a new row;
+    /// operands continue at column 0, comments at column 60 (23 on comment-only rows).
+    private func wrap(_ row: String, commentColumn: Int?, commentOnly: Bool) -> [String] {
+        var out: [String] = []
+        var rest = row
+        var comment = commentColumn
+        // A statement comment that overflows column 79 but fits in columns 60-78 gets a row of its own.
+        if let c = comment, !commentOnly, rest.count > 79, rest.count - c <= 79 - 60 {
+            let chars = Array(rest)
+            return wrap(String(chars[..<c]), commentColumn: nil, commentOnly: false)
+                + wrap(String(repeating: " ", count: 60) + String(chars[c...]), commentColumn: 60, commentOnly: false)
+        }
+        while rest.count >= 79 {
+            let chars = Array(rest)
+            out.append(String(chars[..<79]))
+            let inComment = comment.map { $0 < 79 } ?? false
+            rest = String(repeating: " ", count: inComment ? (commentOnly ? 23 : 60) : 0) + String(chars[79...])
+            if inComment { comment = commentOnly ? 23 : 60 }
+        }
+        out.append(rest)
+        return out
+    }
+
+    func renderListing(displayPath: String, commandLine: String) -> String {
+        recordingUses = false
+        var rows: [String] = []
+        // Location counters, advanced statement by statement.
+        var cursor = [Int](repeating: 0, count: areas.count)
+        var next = 0
+        func advance(to index: Int) {
+            while next < index && next < statements.count {
+                let s = statements[next]
+                if s.area >= 0 { cursor[s.area] = s.offset + s.size }
+                next += 1
+            }
+        }
+        let lines = listingLines.filter { endLine == nil || $0.line <= endLine! }
+        for (k, entry) in lines.enumerated() {
+            let last = k + 1 < listingLines.count ? listingLines[k + 1].firstStatement : statements.count
+            let range = entry.firstStatement..<max(entry.firstStatement, entry.line == endLine ? statements.count : last)
+            advance(to: entry.firstStatement)
+            var address = entry.area >= 0 && entry.area < cursor.count ? cursor[entry.area] : 0
+            if let first = range.first, first < statements.count, statements[first].area >= 0 {
+                address = statements[first].offset - statements[first].padding
+            }
+            // Joined "\" lines: rebuild the logical text from the physical lines.
+            var start = entry.line - 1
+            while start > 0 && sourceText[start - 1].replacingOccurrences(of: "\t", with: " ")
+                    .components(separatedBy: ";")[0].trimmingCharacters(in: .whitespaces).hasSuffix("\\") { start -= 1 }
+            var raw = ""
+            for n in start..<entry.line where n < sourceText.count {
+                var t = sourceText[n]
+                if n < entry.line - 1, let slash = t.lastIndex(of: "\\") { t = String(t[..<slash]) }
+                raw += t
+            }
+            let (label, opcode, operands, comment) = pieces(raw)
+
+            var byteChunks: [String] = []
+            var poolChunks: [String] = []
+            for i in range where i < statements.count {
+                guard let bytes = statementBytes[i], !bytes.isEmpty else { continue }
+                if case .pool = statements[i].kind { poolChunks += chunks(bytes, .words) }
+                else { byteChunks += chunks(bytes, style(of: statements[i])) }
+            }
+            if byteChunks.isEmpty, let register = rnLines[entry.line] {
+                byteChunks = [String(format: "%8d", register)]
+            }
+            if byteChunks.isEmpty, let name = equLines[entry.line], let equ = equates[name] {
+                evalStatement = equ.statement
+                if let v = try? ExprParser.evaluate(equ.text, env: self), v.isConstant {
+                    byteChunks = [String(format: "%08X", UInt32(truncatingIfNeeded: v.constant))]
+                }
+            }
+
+            var stmt = ""
+            var commentOffset: Int?
+            if let opcode {
+                stmt = operands.isEmpty && comment == nil ? opcode : (opcode.count >= 17 ? opcode + " " : pad(opcode, 17))
+                stmt += operands
+                if let comment {
+                    // Statement comments line up at column 60 (relative 29 to the opcode at 31).
+                    stmt = stmt.count + 1 < 29 ? pad(stmt, 29) : stmt + " "
+                    commentOffset = stmt.count
+                    stmt += comment
+                }
+            } else if let comment {
+                commentOffset = 0
+                stmt = comment
+            }
+            let commentOnly = label == nil && opcode == nil
+
+            var block: [(text: String, comment: Int?)] = []
+            let prefix = String(format: "%5d %08X ", entry.line, UInt32(truncatingIfNeeded: address))
+            var head = prefix + (byteChunks.first ?? "")
+            for chunk in byteChunks.dropFirst() {
+                block.append((head + " ", nil))
+                head = String(repeating: " ", count: 14) + chunk
+            }
+            if let label {
+                if head.count < 23 && label.count <= 7 {
+                    let text = pad(head, 23) + (stmt.isEmpty ? label : pad(label, 31 - 23) + stmt)
+                    block.append((text, commentOffset.map { 31 + $0 }))
+                } else {
+                    var labelRow: String
+                    if head.count < 23 { labelRow = pad(head, 23) }
+                    else { block.append((head + " ", nil)); labelRow = String(repeating: " ", count: 23) }
+                    if label.count <= 7 && !stmt.isEmpty {
+                        block.append((labelRow + pad(label, 8) + stmt, commentOffset.map { 31 + $0 }))
+                    } else {
+                        block.append((labelRow + label, nil))
+                        if !stmt.isEmpty {
+                            block.append((String(repeating: " ", count: 31) + stmt, commentOffset.map { 31 + $0 }))
+                        }
+                    }
+                }
+            } else if commentOnly {
+                let base = head.count < 23 ? pad(head, 23) : head + " "
+                block.append((base + stmt, commentOffset.map { base.count + $0 }))
+            } else {
+                let base = head.count < 31 ? pad(head, 31) : head + " "
+                block.append((base + stmt, commentOffset.map { base.count + $0 }))
+            }
+            for (text, column) in block { rows += wrap(text, commentColumn: column, commentOnly: commentOnly) }
+            for chunk in poolChunks { rows.append(String(repeating: " ", count: 14) + chunk + " ") }
+        }
+
+        var out: [String] = []
+        for (page, start) in stride(from: 0, to: max(rows.count, 1), by: 59).enumerated() {
+            out += ["", "", "", "ARM Macro Assembler    Page \(page + 1) ", "", ""]
+            out += rows[start..<min(start + 59, rows.count)]
+        }
+        out += wrap("Command Line: " + commandLine, commentColumn: nil, commentOnly: false)
+
+        // Cross reference.
+        func entryLines(_ name: String, value: UInt32, definition: Int?) -> [String] {
+            var e = ["\(name) \(String(format: "%08X", value))", "", "Symbol: \(name)", "   Definitions"]
+            if let definition { e.append("      At line \(definition) in file \(displayPath)") }
+            e.append("   Uses")
+            let uses = (symbolUses[name] ?? []).sorted()
+            if uses.isEmpty { e.append("      None") }
+            for u in uses { e.append("      At line \(u) in file \(displayPath)") }
+            e.append(uses.isEmpty ? "Comment: \(name) unused" : uses.count == 1 ? "Comment: \(name) used once" : "")
+            return e
+        }
+        var total = 0
+        func section(_ title: String, _ entries: [[String]]) {
+            guard !entries.isEmpty else { return }
+            let content = entries.flatMap { $0 } + ["\(entries.count) symbols"]
+            for (page, start) in stride(from: 0, to: content.count, by: 59).enumerated() {
+                out += ["", "", "", "ARM Macro Assembler    Page \(page + 1) Alphabetic symbol ordering", title, ""]
+                out += content[start..<min(start + 59, content.count)]
+            }
+            total += entries.count
+        }
+        for (a, area) in areas.enumerated() {
+            var list: [(String, UInt32, Int?)] = [(area.name, 0, areaLines[a])]
+            for name in labelOrder where !name.hasPrefix("$") {
+                guard let i = labels[name], statements[i].area == a else { continue }
+                list.append((name, UInt32(statements[i].offset), statements[i].listLine))
+            }
+            section("Relocatable symbols", list.sorted { $0.0.utf8.lexicographicallyPrecedes($1.0.utf8) }
+                .map { entryLines($0.0, value: $0.1, definition: $0.2) })
+        }
+        var absolute: [[String]] = []
+        for name in equates.keys.sorted(by: { $0.utf8.lexicographicallyPrecedes($1.utf8) }) {
+            let equ = equates[name]!
+            evalStatement = equ.statement
+            guard let v = try? ExprParser.evaluate(equ.text, env: self), v.isConstant else { continue }
+            absolute.append(entryLines(name, value: UInt32(truncatingIfNeeded: v.constant), definition: equ.line))
+        }
+        section("Absolute symbols", absolute)
+        section("External symbols", imports.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+            .map { entryLines($0, value: 0, definition: importLines[$0]) })
+        out.append("\(total) symbols in table")
+        return out.joined(separator: "\r\n") + "\r\n"
     }
 }

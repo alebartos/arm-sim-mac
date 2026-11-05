@@ -131,12 +131,36 @@ final class BuildSystem {
                     // Keil armasm syntax: native assembler (no clang involved).
                     if upToDate { continue }
                     log(LogLine(text: "assembling \(source.lastPathComponent)..."))
+                    // Keil-style listing next to the objects: Listings/ (ARMSim_Listings/ for imported µVision
+                    // projects, so Keil's own files stay untouched).
+                    let listingFolder = outputFolder.hasPrefix("ARMSim_") ? "ARMSim_Listings" : "Listings"
+                    let listingsDir = projectDir.appendingPathComponent(listingFolder)
+                    let stem = source.deletingPathExtension().lastPathComponent
+                    let relativeSource = source.path.hasPrefix(projectDir.standardizedFileURL.path + "/")
+                        ? String(source.path.dropFirst(projectDir.standardizedFileURL.path.count + 1)) : source.lastPathComponent
+                    let windowsSource = relativeSource.replacingOccurrences(of: "/", with: "\\")
+                    let includeDirs = project.options.includePaths.split(separator: ";")
+                        .map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    let commandLine = (["--debug", "--xref", "--cpu=\(device.core)",
+                                        "--depend=.\\\(outputFolder.lowercased())\\\(stem.lowercased()).d",
+                                        "-o.\\\(outputFolder.lowercased())\\\(stem.lowercased()).o"]
+                        + includeDirs.map { "-I" + $0.replacingOccurrences(of: "/", with: "\\") }
+                        + asmDefines.map { define -> String in
+                            let value = define.contains("=") ? define.replacingOccurrences(of: "=", with: " SETA ") : define + " SETA 1"
+                            return "--predefine=\"" + value + "\""
+                        }
+                        + ["--list=.\\\(listingFolder.lowercased())\\\(stem.lowercased()).lst", windowsSource])
+                        .joined(separator: " ")
                     let options = ArmasmAssembler.Options(
                         arch: device.architecture, predefines: asmDefines,
-                        includePaths: project.options.includePaths.split(separator: ";").map {
-                            projectDir.appendingPathComponent(String($0).trimmingCharacters(in: .whitespaces)).path
-                        })
+                        includePaths: includeDirs.map { projectDir.appendingPathComponent($0).path },
+                        listing: (displayPath: windowsSource, commandLine: commandLine))
                     let result = ArmasmAssembler.assemble(source: text, path: source.path, options: options)
+                    if let listing = result.listingText {
+                        try? FileManager.default.createDirectory(at: listingsDir, withIntermediateDirectories: true)
+                        try? listing.write(to: listingsDir.appendingPathComponent(stem.lowercased() + ".lst"),
+                                           atomically: true, encoding: .utf8)
+                    }
                     for d in result.diagnostics {
                         let file = (d.file as NSString).lastPathComponent
                         log(LogLine(text: "\(file)(\(d.line)): \(d.isError ? "error" : "warning"): \(d.message)",
