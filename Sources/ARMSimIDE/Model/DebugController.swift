@@ -79,6 +79,17 @@ final class DebugController: ObservableObject {
     }
 
     /// LandTiger buttons: 0 = INT0 (EINT0), 1 = KEY1 (EINT1), 2 = KEY2 (EINT2).
+    @Published var joystickHeld = Set<Int>()
+
+    func setJoystick(_ direction: LPC17xx.Joystick, pressed: Bool) {
+        if pressed { joystickHeld.insert(direction.rawValue) } else { joystickHeld.remove(direction.rawValue) }
+        guard let lpc else { return }
+        queue.async { [weak self] in
+            lpc.setJoystick(direction, pressed: pressed)
+            if self?.isRunning == false { self?.publish(stopMessage: nil) }
+        }
+    }
+
     func setPotentiometer(_ value: Double) {
         potentiometer = min(max(value, 0), 1)
         guard let lpc else { return }

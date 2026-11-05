@@ -341,6 +341,7 @@ extension SmokeTest {
         if let pot = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_POT"].flatMap(Double.init) { d.potentiometer = pot }
         say("keil image: \(ws.keilImageURL?.path ?? "none")")
         say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
+        if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_NOBP"] != nil { ws.removeAllBreakpoints() }
         if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }
         var steps = 0
         var waits = 0
@@ -359,6 +360,10 @@ extension SmokeTest {
             if steps == 17, let seconds = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_RUN"].flatMap(Double.init) {
                 // Free run, then stop and report where the program is (e.g. the main loop).
                 steps += 1
+                if let joy = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_JOY"],
+                   let direction = LPC17xx.Joystick.allCases.first(where: { "\($0)" == joy }) {
+                    d.setJoystick(direction, pressed: true)
+                }
                 d.run()
                 DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                     d.stop()
@@ -370,10 +375,15 @@ extension SmokeTest {
                 say("build log:\n" + ws.buildLog.map(\.text).joined(separator: "\n"))
                 say("pack: \(ws.project?.options.packID ?? "none"), svd: \(ws.project?.options.svdPath ?? "none")")
                 say("system viewer: \(SystemViewerState.shared.svd.map { "\($0.name), \($0.peripherals.count) peripherals" } ?? "no SVD")")
+                say("debugger log: \(d.commandLog.suffix(3))")
+                if let lpc = d.lpc {
+                    say(String(format: "RIT ctrl 0x%X cmp 0x%X cnt 0x%X mask 0x%X; T0 tc 0x%X", lpc.rit.controlRegister, lpc.rit.compare,
+                               lpc.rit.counter, lpc.rit.compareMask, lpc.timers[0].counter))
+                }
                 say("lpc models: \(d.lpc != nil), executed addresses: \(d.executedAddresses.count)")
                 if let lpc = d.lpc {
-                    say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X", lpc.gpio.output[2] & 0xFF,
-                               lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5]))
+                    say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X, P1 in 0x%08X, %llu cycles", lpc.gpio.output[2] & 0xFF,
+                               lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5], lpc.gpio.input[1], d.snapshot.cycles))
                 }
                 if let window = NSApp.windows.first(where: { $0.isVisible }), let view = window.contentView,
                    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {

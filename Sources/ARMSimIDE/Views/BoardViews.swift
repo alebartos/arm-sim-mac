@@ -1,3 +1,4 @@
+import ARMCore
 import SwiftUI
 
 /// Peripherals ▸ GPIO Fast Interface ▸ Port n (µVision LPC17xx simulator dialog).
@@ -82,10 +83,18 @@ struct LandTigerWindow: View {
                     }
                 }
             }
-            HStack(spacing: 18) {
-                button("INT0", index: 0, pin: "P2.10")
-                button("KEY1", index: 1, pin: "P2.11")
-                button("KEY2", index: 2, pin: "P2.12")
+            HStack(spacing: 28) {
+                HStack(spacing: 18) {
+                    button("INT0", index: 0, pin: "P2.10")
+                    button("KEY1", index: 1, pin: "P2.11")
+                    button("KEY2", index: 2, pin: "P2.12")
+                }
+                VStack(spacing: 2) {
+                    joystick("▲", .up)
+                    HStack(spacing: 2) { joystick("◀", .left); joystick("●", .select); joystick("▶", .right) }
+                    joystick("▼", .down)
+                    Text("Joystick P1.25-29").font(.system(size: 8)).foregroundColor(.secondary)
+                }
             }
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -121,7 +130,20 @@ struct LandTigerWindow: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 420, minHeight: 320)
+        .frame(minWidth: 520, minHeight: 330)
+    }
+
+    private func joystick(_ symbol: String, _ direction: LPC17xx.Joystick) -> some View {
+        let held = debugger.joystickHeld.contains(direction.rawValue)
+        return Text(symbol)
+            .font(.system(size: 10))
+            .frame(width: 24, height: 22)
+            .background(RoundedRectangle(cornerRadius: 4).fill(held ? Color(white: 0.55) : Color(white: 0.85)))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.black.opacity(0.35)))
+            .help("\(direction) (P1.\(direction.rawValue))")
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !held { debugger.setJoystick(direction, pressed: true) } }
+                .onEnded { _ in debugger.setJoystick(direction, pressed: false) })
     }
 
     private func button(_ title: String, index: Int, pin: String) -> some View {

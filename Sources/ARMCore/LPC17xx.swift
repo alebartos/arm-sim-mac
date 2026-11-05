@@ -625,6 +625,14 @@ public final class LPC17xx {
         return lpc
     }
 
+    /// LandTiger joystick, active low on P1.25 (select), P1.26 (down), P1.27 (left), P1.28 (right), P1.29 (up).
+    public enum Joystick: Int, CaseIterable { case select = 25, down, left, right, up }
+
+    public func setJoystick(_ direction: Joystick, pressed: Bool) {
+        let bit = UInt32(direction.rawValue)
+        if pressed { gpio.input[1] &= ~(1 << bit) } else { gpio.input[1] |= 1 << bit }
+    }
+
     /// LandTiger push buttons: INT0 (P2.10 / EINT0), KEY1 (P2.11 / EINT1), KEY2 (P2.12 / EINT2).
     public func setButton(_ eint: Int, pressed: Bool) {
         let bit = UInt32(10 + eint)
