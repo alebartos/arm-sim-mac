@@ -17,6 +17,7 @@ usage: armsim [options] <program.elf | program.o | program.bin>
   --rom <base:size>      ROM (IROM1) for linking several objects, e.g. 0x0:0x80000
   --ram <base:size>      RAM (IRAM1) for linking several objects, e.g. 0x10000000:0x8000
   --translate <file.s>   print the GNU-syntax translation of a Keil armasm file and exit
+  --assemble <in.s> <out.o>  assemble a Keil armasm file with the native assembler and exit
 
 Default start: .o files call `_start`/`main`/first symbol and return to a trap;
 executables and .bin files reset from the vector table at their lowest address.
@@ -97,6 +98,16 @@ while !arguments.isEmpty {
             FileHandle.standardError.write(Data("\(file):\(d.line): \(d.isError ? "error" : "warning"): \(d.message)\n".utf8))
         }
         exit(result.diagnostics.contains { $0.isError } ? 1 : 0)
+    case "--assemble":
+        // --assemble <file.s> <out.o>: native armasm assembler (respects a preceding --cpu).
+        let file = value(), out = value()
+        let result = ArmasmAssembler.assemble(fileAt: file, options: .init(arch: arch))
+        for d in result.diagnostics {
+            FileHandle.standardError.write(Data("\(d.file):\(d.line): \(d.isError ? "error" : "warning"): \(d.message)\n".utf8))
+        }
+        guard let object = result.object else { exit(1) }
+        do { try Data(object).write(to: URL(fileURLWithPath: out)) } catch { fail("cannot write \(out)") }
+        exit(0)
     default:
         if arg.hasPrefix("-") { fail("unknown option \(arg)\n\n\(usage)") }
         paths.append(arg)
