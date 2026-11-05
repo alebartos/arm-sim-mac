@@ -243,6 +243,20 @@ struct OptionsDialog: View {
         }
     }
 
+    private func chooseInitFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = []
+        panel.allowsOtherFileTypes = true
+        let dir = Workspace.shared.projectDirectory
+        panel.directoryURL = dir
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let dir, url.path.hasPrefix(dir.path + "/") {
+            options.debugIniFile = String(url.path.dropFirst(dir.path.count + 1))
+        } else {
+            options.debugIniFile = url.path
+        }
+    }
+
     private var debugTab: some View {
         HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
@@ -251,6 +265,15 @@ struct OptionsDialog: View {
                 Toggle("Run to main()", isOn: $options.runToMain)
                 Toggle("Stop on fault (instead of entering the fault handler)", isOn: $options.stopOnFault)
                 Toggle("Periodic Window Update", isOn: $options.periodicUpdate)
+                Text("Initialization File:")
+                HStack {
+                    TextField("", text: Binding(get: { options.debugIniFile ?? "" },
+                                                set: { options.debugIniFile = $0.isEmpty ? nil : $0 }))
+                        .frame(width: 220)
+                    Button("...") { chooseInitFile() }
+                }
+                Text("Debug script run when the session starts (FUNC, SIGNAL, DEFINE BUTTON, commands).")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
             }
             Divider()
             VStack(alignment: .leading, spacing: 8) {

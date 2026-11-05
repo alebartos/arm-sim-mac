@@ -515,3 +515,28 @@ struct CodeCoverageWindow: View {
         }
     }
 }
+
+/// Toolbox: buttons defined by debug scripts (DEFINE BUTTON "label", "command"); a click runs the
+/// command as if typed in the Command window.
+struct ToolboxWindow: View {
+    @ObservedObject var debugger = Workspace.shared.debugger
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if debugger.toolboxButtons.isEmpty {
+                Text(debugger.isActive ? "No buttons. A debug script adds them with\nDEFINE BUTTON \"label\", \"command\"."
+                                       : "Start a debug session to use the toolbox.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+            }
+            ForEach(debugger.toolboxButtons) { button in
+                Button(button.label) { debugger.execute(command: button.command, workspace: Workspace.shared) }
+                    .frame(maxWidth: .infinity)
+                    .help(button.command)
+                    .disabled(!debugger.isActive)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(minWidth: 180, minHeight: 120)
+    }
+}

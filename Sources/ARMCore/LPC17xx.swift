@@ -49,6 +49,20 @@ public final class LPCSystemControl: WordDevice {
     public internal(set) var externalInterrupts: UInt32 = 0
     /// Buttons currently held (for level-sensitive EINT).
     var heldEINT: UInt32 = 0
+    /// Main oscillator (the target's Xtal setting).
+    public var crystalHz: Double = 12_000_000 { didSet { updateCoreClock() } }
+    /// CCLK from CLKSRCSEL, PLL0 and CCLKCFG (4 MHz IRC after reset). Cached for the UI thread.
+    public private(set) var coreClockHz: Double = 4_000_000
+
+    private func updateCoreClock() {
+        let input: Double = [4_000_000, crystalHz, 32_768, 4_000_000][Int((registers[0x10C] ?? 0) & 3)]
+        let divider = Double(((registers[0x104] ?? 0) & 0xFF) + 1)
+        var clock = input
+        if pll0Control & 3 == 3 { // enabled and connected: Fcco = 2 * M * Fin / N
+            clock = 2 * Double((pll0Config & 0x7FFF) + 1) * input / Double(((pll0Config >> 16) & 0xFF) + 1)
+        }
+        coreClockHz = clock / divider
+    }
 
     override func readWord(_ offset: UInt32) -> UInt32 {
         switch offset {
@@ -71,8 +85,8 @@ public final class LPCSystemControl: WordDevice {
 
     override func writeWord(_ offset: UInt32, _ value: UInt32, mask: UInt32) {
         switch offset {
-        case 0x080: pll0Control = merge(pll0Control, value, mask) & 3
-        case 0x084: pll0Config = merge(pll0Config, value, mask)
+        case 0x080: pll0Control = merge(pll0Control, value, mask) & 3; updateCoreClock()
+        case 0x084: pll0Config = merge(pll0Config, value, mask); updateCoreClock()
         case 0x0A0: pll1Control = merge(pll1Control, value, mask) & 3
         case 0x0A4: pll1Config = merge(pll1Config, value, mask)
         case 0x08C, 0x0AC: break // feed sequence: changes apply immediately in the model
@@ -82,6 +96,7 @@ public final class LPCSystemControl: WordDevice {
         default:
             registers[offset] = merge(registers[offset] ?? 0, value, mask)
             if offset == 0x1A8 || offset == 0x1AC { dividers = LPCPeripheralClock.allCases.map(computeDivider) }
+            if offset == 0x104 || offset == 0x10C { updateCoreClock() }
         }
     }
 

@@ -122,6 +122,7 @@ struct DebugToolbar: View {
             ToolButton(icon: "text.bubble", help: "Serial Windows: Debug (printf) Viewer") { layout.showBottomRight = true; layout.bottomRightTab = 3 }
             ToolButton(icon: "waveform.path.ecg", help: "Analysis Windows: Logic Analyzer") { openWindow(id: "logic") }
             ToolButton(icon: "rectangle.3.group", help: "System Viewer Windows") { openWindow(id: "systemviewer") }
+            ToolButton(icon: "wrench.and.screwdriver", help: "Toolbox") { openWindow(id: "toolbox") }
             Spacer()
         }
         .frame(height: 26)

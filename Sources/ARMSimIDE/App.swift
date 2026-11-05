@@ -24,6 +24,7 @@ struct ARMSimApp: App {
         Window("System Viewer", id: "systemviewer") { SystemViewerView() }
         Window("Pack Installer", id: "packs") { PackInstallerView() }
         Window("Logic Analyzer", id: "logic") { LogicAnalyzerView() }
+        Window("Toolbox", id: "toolbox") { ToolboxWindow() }
     }
 }
 
@@ -192,6 +193,7 @@ struct ViewMenuItems: View {
         Toggle("Build Output Window", isOn: $layout.showBuildOutput)
         Divider()
         Toggle("Command Window", isOn: $layout.showCommand)
+        Button("Toolbox Window") { openWindow(id: "toolbox") }
         Toggle("Disassembly Window", isOn: $layout.showDisassembly)
         Toggle("Registers Window", isOn: $layout.showRegisters)
         Button("Call Stack Window") { layout.showBottomRight = true; layout.bottomRightTab = 0 }
@@ -342,6 +344,7 @@ extension SmokeTest {
         say("keil image: \(ws.keilImageURL?.path ?? "none")")
         say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
         if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_NOBP"] != nil { ws.removeAllBreakpoints() }
+        if let ini = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_INI"] { ws.project?.options.debugIniFile = ini }
         if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }
         var steps = 0
         var waits = 0
@@ -363,6 +366,9 @@ extension SmokeTest {
                 if let joy = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_JOY"],
                    let direction = LPC17xx.Joystick.allCases.first(where: { "\($0)" == joy }) {
                     d.setJoystick(direction, pressed: true)
+                }
+                for command in (ProcessInfo.processInfo.environment["ARMSIM_SMOKE_CMD"] ?? "").components(separatedBy: ";;") {
+                    d.execute(command: String(command), workspace: ws)
                 }
                 d.run()
                 // Touch script "x,y;x,y;...": each point held 0.4 s, then released 0.4 s.
@@ -391,6 +397,10 @@ extension SmokeTest {
                 say("pack: \(ws.project?.options.packID ?? "none"), svd: \(ws.project?.options.svdPath ?? "none")")
                 say("system viewer: \(SystemViewerState.shared.svd.map { "\($0.name), \($0.peripherals.count) peripherals" } ?? "no SVD")")
                 say("debugger log: \(d.commandLog.suffix(3))")
+                if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_INI"] != nil || ProcessInfo.processInfo.environment["ARMSIM_SMOKE_CMD"] != nil {
+                    say("command window:\n" + d.commandLog.suffix(60).joined(separator: "\n"))
+                    say("toolbox: \(d.toolboxButtons.map(\.label))")
+                }
                 if let lpc = d.lpc {
                     for name in (ProcessInfo.processInfo.environment["ARMSIM_SMOKE_DUMP"] ?? "").split(separator: ",") {
                         if let sym = ws.lastProduct?.image.symbol(named: String(name)) {

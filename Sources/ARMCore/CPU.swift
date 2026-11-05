@@ -120,6 +120,9 @@ public final class CPU {
     }
 
     public internal(set) var cycles: UInt64 = 0
+    /// Cycle count at which the debugger needs control back (debug script signals); a sleeping
+    /// core fast-forwards no further than this.
+    public var nextExternalEvent: UInt64 = .max
     public internal(set) var instructionCount: UInt64 = 0
 
     // MARK: Debug
@@ -323,6 +326,10 @@ public final class CPU {
     private func cyclesUntilNextEvent() -> UInt64? {
         syncDevices()
         var best = system.clocksUntilSysTickInterrupt()
+        if nextExternalEvent != .max {
+            let c = nextExternalEvent > cycles ? nextExternalEvent - cycles : 1
+            if c < (best ?? .max) { best = c }
+        }
         for device in clockedDevices {
             if let c = device.cyclesUntilEvent(), c < (best ?? .max) { best = c }
         }

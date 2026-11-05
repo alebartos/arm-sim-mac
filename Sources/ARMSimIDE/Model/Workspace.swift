@@ -170,7 +170,7 @@ final class Workspace: ObservableObject {
     /// The µVision options file (.uvoptx: breakpoints, watch and memory windows, debug settings).
     private var uvOptionsDocument: XMLDocument?
     /// What was loaded from it, to write it back only when the user changed something.
-    private var uvOptionsLoaded: (breakpoints: Set<SourceBreakpoint>, watch: [String], watch2: [String], memory: String?)?
+    private var uvOptionsLoaded: (breakpoints: Set<SourceBreakpoint>, watch: [String], watch2: [String], memory: String?, ini: String?)?
 
     private func uvTargetNode(_ index: Int) -> XMLElement? {
         (try? uvDocument?.nodes(forXPath: "/Project/Targets/Target"))?.compactMap { $0 as? XMLElement }[safe: index]
@@ -492,7 +492,7 @@ final class Workspace: ObservableObject {
                     return
                 }
                 self.mode = .debug
-                self.debugger.start(product: product, breakpoints: self.resolvedBreakpointAddresses())
+                self.startDebugger(product)
                 SystemViewerState.shared.load(svdURL: self.svdURL())
             }
         }
@@ -507,6 +507,22 @@ final class Workspace: ObservableObject {
     }
 
     /// Debug ▸ Start Debug Session with Keil Image: load µVision's .axf without building.
+    /// Debug ▸ Options ▸ Initialization File (from the .uvoptx / target options), relative to the project.
+    var debugIniURL: URL? {
+        guard let dir = projectDirectory, let path = project?.options.debugIniFile, !path.isEmpty else { return nil }
+        let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : dir.appendingPathComponent(path).standardizedFileURL
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func startDebugger(_ product: BuildProduct) {
+        debugger.workspace = self
+        debugger.workspaceDirectory = projectDirectory
+        if let path = project?.options.debugIniFile, !path.isEmpty, debugIniURL == nil {
+            buildLog.append(LogLine(text: "*** warning: initialization file '\(path)' not found", kind: .warning))
+        }
+        debugger.start(product: product, breakpoints: resolvedBreakpointAddresses(), initFile: debugIniURL)
+    }
+
     func startDebugWithKeilImage() {
         guard mode == .edit, let project, let dir = projectDirectory, let axf = keilImageURL, !isBuilding else { NSSound.beep(); return }
         saveAll()
@@ -523,7 +539,7 @@ final class Workspace: ObservableObject {
                     return
                 }
                 self.mode = .debug
-                self.debugger.start(product: product, breakpoints: self.resolvedBreakpointAddresses())
+                self.startDebugger(product)
                 SystemViewerState.shared.load(svdURL: self.svdURL())
             }
         }
@@ -591,11 +607,12 @@ final class Workspace: ObservableObject {
         debugger.watchExpressions = watch
         let memory = text("TargetOption/MemoryWindow1/Mm/ItemText", in: target)
         if let memory, !memory.isEmpty { UserDefaults.standard.set(memory, forKey: "memoryAddress") }
-        uvOptionsLoaded = (loaded, watch, watch2, memory)
+        let ini = text("TargetOption/DebugOpt/sIfile", in: target) ?? ""
+        let iniPath = ini.isEmpty ? nil : ini.replacingOccurrences(of: "\\", with: "/")
+        uvOptionsLoaded = (loaded, watch, watch2, memory, iniPath)
         if var project {
             if let goMain = text("TargetOption/DebugOpt/sGomain", in: target) { project.options.runToMain = goMain != "0" }
-            let ini = text("TargetOption/DebugOpt/sIfile", in: target) ?? ""
-            project.options.debugIniFile = ini.isEmpty ? nil : ini.replacingOccurrences(of: "\\", with: "/")
+            project.options.debugIniFile = iniPath
             self.project = project
         }
     }
@@ -607,8 +624,13 @@ final class Workspace: ObservableObject {
               let option = target.elements(forName: "TargetOption").first else { return }
         let memory = UserDefaults.standard.string(forKey: "memoryAddress")
         let watch = debugger.watchExpressions
+        let ini = project?.options.debugIniFile
         guard loaded.breakpoints != breakpoints || loaded.watch != watch || (loaded.memory != nil && loaded.memory != memory)
+                || loaded.ini != ini
         else { return }
+        if loaded.ini != ini, let item = (try? option.nodes(forXPath: "DebugOpt/sIfile"))?.first {
+            item.stringValue = (ini ?? "").replacingOccurrences(of: "/", with: "\\")
+        }
         func element(_ name: String, _ value: String) -> XMLElement { XMLElement(name: name, stringValue: value) }
         // µVision layout: two spaces per level, TargetOption children at depth 6.
         func indent(_ e: XMLElement, depth: Int) {
@@ -669,13 +691,15 @@ final class Workspace: ObservableObject {
                               element("BreakByAccess", "0"), element("BreakIfRCount", "1"),
                               element("Filename", ".\\" + relative.replacingOccurrences(of: "/", with: "\\")),
                               element("ExecCommand", ""),
-                              element("Expression", "\\\\\(module)\\\(relative)\\\(bp.line)")] {
+                              element("Expression", "\\\\\(module)\\\(relative.replacingOccurrences(of: "/", with: "\\"))\\\(bp.line)")] {
                     node.addChild(child)
                 }
                 indent(node, depth: 8)
                 added.append(node)
             }
             if let existing {
+                // µVision writes an empty list as <Breakpoint></Breakpoint>: give it its closing indentation.
+                if existing.childCount == 0 { existing.addChild(XMLNode.text(withStringValue: "\n      ") as! XMLNode) }
                 // Before the closing whitespace of <Breakpoint>.
                 var at = existing.childCount
                 if at > 0, existing.child(at: at - 1)?.kind == .text { at -= 1 }
@@ -726,7 +750,7 @@ final class Workspace: ObservableObject {
         }
         if !text.hasSuffix("\n") { text += "\n" }
         try? text.write(to: url, atomically: true, encoding: .utf8)
-        uvOptionsLoaded = (breakpoints, watch, window2, memory)
+        uvOptionsLoaded = (breakpoints, watch, window2, memory, ini)
     }
 
     // MARK: Breakpoints

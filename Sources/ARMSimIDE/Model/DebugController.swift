@@ -49,6 +49,14 @@ final class DebugController: ObservableObject {
     @Published var printfOutput = ""
     @Published private(set) var revision = 0
     @Published var watchExpressions: [String] = []
+    /// Toolbox buttons defined by debug scripts (DEFINE BUTTON).
+    @Published private(set) var toolboxButtons: [ToolboxButton] = []
+    weak var workspace: Workspace?
+    /// Debug script interpreter (simulation queue only).
+    private var scripts: ScriptEngine?
+    private var initFile: URL?
+    /// Project folder: relative script paths (INCLUDE) start here.
+    var workspaceDirectory: URL?
 
     private(set) var product: BuildProduct?
     private(set) var simulator: Simulator?
@@ -174,12 +182,16 @@ final class DebugController: ObservableObject {
     }
     private let outputLock = NSLock()
 
-    var clockHz: Double { (product?.options.xtalMHz ?? 12) * 1_000_000 }
+    /// Core clock for times shown and script delays: LPC17xx CCLK from its PLL setup, else the Xtal setting.
+    var clockHz: Double { lpc?.systemControl.coreClockHz ?? (product?.options.xtalMHz ?? 12) * 1_000_000 }
 
     // MARK: Session
 
-    func start(product: BuildProduct, breakpoints: Set<UInt32>) {
+    func start(product: BuildProduct, breakpoints: Set<UInt32>, initFile: URL? = nil) {
         self.product = product
+        self.initFile = initFile
+        stopRequested = false
+        toolboxButtons = []
         breakpointAddresses = breakpoints
         commandLog = []
         printfOutput = ""
@@ -194,6 +206,11 @@ final class DebugController: ObservableObject {
             guard let self else { return }
             self.makeSimulator()
             self.resetOnQueue()
+            if let initFile, let scripts = self.scripts {
+                self.appendLog("Include \"\(initFile.lastPathComponent)\"")
+                scripts.runFile(initFile)
+                self.scheduleSignals()
+            }
             if product.options.runToMain, let main = self.simulator?.image?.symbol(named: "main"),
                self.simulator?.cpu.pc != main.address {
                 self.runOnQueue(until: { $0.cpu.pc == main.address }, limit: 50_000_000)
@@ -204,7 +221,7 @@ final class DebugController: ObservableObject {
 
     func stopSession() {
         stopRequested = true
-        queue.sync {}
+        queue.sync { scripts?.killAllSignals(); scripts = nil }
         isActive = false
         isRunning = false
         simulator = nil
@@ -224,6 +241,7 @@ final class DebugController: ObservableObject {
         // Behavioural peripheral models where available (LandTiger / LPC17xx)...
         lpc = product.device.name.uppercased().hasPrefix("LPC17") ? LPC17xx.install(on: sim) : nil
         lpc?.adc.inputs[5] = UInt16((potentiometer * 4095).rounded())
+        lpc?.systemControl.crystalHz = o.xtalMHz * 1_000_000
         lcdFrame = nil
         lcdFrameCount = .max
         // ...and generic registers (hold written values) for the rest of the peripheral space.
@@ -247,6 +265,13 @@ final class DebugController: ObservableObject {
             }
         }
         simulator = sim
+        scripts?.killAllSignals()
+        let engine = ScriptEngine(host: self)
+        engine.onButtonsChanged = { [weak self] buttons in
+            let list = buttons.enumerated().map { ToolboxButton(id: $0.offset, label: $0.element.label, command: $0.element.command) }
+            DispatchQueue.main.async { self?.toolboxButtons = list }
+        }
+        scripts = engine
     }
 
     private func appendOutput(_ text: String) {
@@ -379,6 +404,7 @@ final class DebugController: ObservableObject {
         let pc = sim.cpu.pc
         let reason = sim.cpu.run(maxInstructions: 1)
         sampleAnalyzer(sim)
+        scheduleSignals()
         return describe(reason, pc: pc, sim: sim)
     }
 
@@ -405,7 +431,8 @@ final class DebugController: ObservableObject {
         while executed < limit {
             if stopRequested { return nil }
             applyInjected()
-            let chunk: UInt64 = condition == nil ? (sampling ? 64 : 20_000) : 1
+            var chunk: UInt64 = condition == nil ? (sampling ? 64 : 20_000) : 1
+            if let wait = scheduleSignals() { chunk = min(chunk, max(wait, 1)) }
             let pc = sim.cpu.pc
             if !first && condition == nil && breakpointAddresses.contains(pc) {
                 return nil
@@ -430,6 +457,18 @@ final class DebugController: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// Run the signal functions that are due; returns cycles until the next one wakes up.
+    @discardableResult
+    private func scheduleSignals() -> UInt64? {
+        guard let scripts, let sim = simulator, scripts.hasSignals else {
+            simulator?.cpu.nextExternalEvent = .max
+            return nil
+        }
+        let wait = scripts.runSignals(cycles: sim.cpu.cycles)
+        sim.cpu.nextExternalEvent = wait.map { sim.cpu.cycles &+ $0 } ?? .max
+        return wait
     }
 
     private func describe(_ reason: StopReason, pc: UInt32, sim: Simulator) -> String? {
@@ -613,9 +652,10 @@ final class DebugController: ObservableObject {
         let command = raw.trimmingCharacters(in: .whitespaces)
         guard !command.isEmpty else { return }
         log("> " + command)
-        let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
-        let verb = parts[0].uppercased()
-        let argument = parts.count > 1 ? parts[1] : ""
+        // The verb is the leading word ("g, main" and "G main" both mean G with argument "main").
+        let word = command.prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "?" }
+        let verb = (word.isEmpty ? String(command.prefix(1)) : String(word)).uppercased()
+        let argument = command.dropFirst(max(word.count, 1)).trimmingCharacters(in: .whitespaces)
         switch verb {
         case "G", "GO":
             if argument.isEmpty || argument == "," { run() }
@@ -660,19 +700,174 @@ final class DebugController: ObservableObject {
             log(String(format: "xPSR = 0x%08X", snapshot.xpsr))
         case "WS":
             if !argument.isEmpty { watchExpressions.append(argument) }
+        case "LA":
+            if let error = LogicAnalyzer.shared.addSignal(argument) { log("*** error: \(error)") }
         case "EXIT":
             workspace.toggleDebugSession()
         case "HELP", "?":
             if argument.isEmpty {
-                log("Commands: G [,addr]  T  P  RESET  BS addr|symbol  BK *  BL  D addr  U addr  R  WS expr  EXIT")
-                log("Or type an expression: R0, msTicks, *0x20000000, &main")
+                log("Commands: G [,addr]  T  P  RESET  BS addr|symbol  BK *  BL  D addr  U addr  R  WS expr  LA expr  EXIT")
+                log("Scripts: INCLUDE file  FUNC/SIGNAL definitions  SIGNAL STATE|KILL name  DEFINE BUTTON \"label\", \"command\"")
+                log("         KILL BUTTON n  MAP start, end  DEFINE int name")
+                log("Or type an expression: R0, msTicks, *0x20000000, &main, PORT2 = 0, AIN5 = 1.6, myfunc()")
             } else if let r = evaluate(argument) {
                 log(r.text)
             }
         default:
-            if let r = evaluate(command) { log(r.text) } else { log("*** error 34: undefined identifier") }
+            runScriptCommand(command)
         }
     }
+
+    /// Script commands and expressions go to the interpreter on the simulation queue (between
+    /// instruction chunks while running).
+    func runScriptCommand(_ command: String) {
+        guard isActive else { log("*** error: no debug session"); return }
+        inject { [weak self] in
+            self?.scripts?.runCommand(command)
+            self?.scheduleSignals()
+        }
+    }
+}
+
+struct ToolboxButton: Identifiable, Equatable {
+    let id: Int
+    let label: String
+    let command: String
+}
+
+// MARK: - Debug script host (simulation queue)
+
+extension DebugController: ScriptHost {
+    func read(_ address: UInt32, size: Int) -> UInt32? {
+        guard let sim = simulator else { return nil }
+        if let v = try? sim.memory.read(address, size: size) { return v }
+        return nil
+    }
+
+    func write(_ address: UInt32, size: Int, value: UInt32) {
+        try? simulator?.memory.write(address, size: size, value: value)
+    }
+
+    func register(_ name: String) -> ScriptValue? {
+        guard let cpu = simulator?.cpu else { return nil }
+        let n = name.uppercased()
+        if n.hasPrefix("R"), let i = Int(n.dropFirst()), (0..<16).contains(i) { return .int(Int64(cpu.r[i])) }
+        switch n {
+        case "SP": return .int(Int64(cpu.sp))
+        case "LR": return .int(Int64(cpu.lr))
+        case "PC", "$": return .int(Int64(cpu.pc))
+        case "MSP": return .int(Int64(cpu.msp))
+        case "PSP": return .int(Int64(cpu.psp))
+        case "XPSR", "PSR": return .int(Int64(cpu.xpsr))
+        case "PRIMASK": return .int(cpu.primask ? 1 : 0)
+        case "FAULTMASK": return .int(cpu.faultmask ? 1 : 0)
+        case "BASEPRI": return .int(Int64(cpu.basepri))
+        case "CONTROL": return .int(Int64(cpu.control))
+        case "STATES": return .int(Int64(cpu.cycles))
+        default: return nil
+        }
+    }
+
+    func setRegister(_ name: String, _ value: ScriptValue) -> Bool {
+        guard let cpu = simulator?.cpu else { return false }
+        let n = name.uppercased(), v = value.u32
+        if n.hasPrefix("R"), let i = Int(n.dropFirst()), (0..<16).contains(i) {
+            if i == 15 { cpu.pc = v } else if i == 13 { cpu.sp = v } else { cpu.r[i] = v }
+            return true
+        }
+        switch n {
+        case "SP": cpu.sp = v
+        case "LR": cpu.lr = v
+        case "PC", "$": cpu.pc = v
+        case "MSP": cpu.msp = v
+        case "PSP": cpu.psp = v
+        case "PRIMASK": cpu.primask = v & 1 != 0
+        case "FAULTMASK": cpu.faultmask = v & 1 != 0
+        case "BASEPRI": cpu.basepri = v & 0xFF
+        default: return false
+        }
+        return true
+    }
+
+    /// LPC17xx VTREGs: PORT0-4 (pin levels), AIN0-7 (volts), AOUT (volts), S0IN-S3IN, CLOCK.
+    func vtreg(_ name: String) -> ScriptValue? {
+        let n = name.uppercased()
+        if n == "CLOCK" || n == "XTAL" { return .int(Int64(clockHz)) }
+        guard let lpc else { return nil }
+        if n.hasPrefix("PORT"), let p = Int(n.dropFirst(4)), (0..<5).contains(p) { return .int(Int64(lpc.gpio.pins(p))) }
+        if n.hasPrefix("AIN"), let i = Int(n.dropFirst(3)), (0..<8).contains(i) {
+            return .double(Double(lpc.adc.inputs[i]) * 3.3 / 4095)
+        }
+        if n == "AOUT" { return .double(Double(lpc.dac.value) * 3.3 / 1024) }
+        return nil
+    }
+
+    func setVTREG(_ name: String, _ value: ScriptValue) -> Bool {
+        let n = name.uppercased()
+        guard let lpc else { return false }
+        if n.hasPrefix("PORT"), let p = Int(n.dropFirst(4)), (0..<5).contains(p) {
+            let old = lpc.gpio.input[p], new = value.u32
+            lpc.gpio.input[p] = new
+            if p == 2 { // KEY buttons on P2.10-12 also drive EINT0-2
+                for eint in 0..<3 where (old ^ new) & (1 << UInt32(10 + eint)) != 0 {
+                    lpc.setButton(eint, pressed: new & (1 << UInt32(10 + eint)) == 0)
+                }
+            }
+            return true
+        }
+        if n.hasPrefix("AIN"), let i = Int(n.dropFirst(3)), (0..<8).contains(i) {
+            lpc.adc.inputs[i] = UInt16(max(0, min(4095, (value.double / 3.3 * 4095).rounded())))
+            return true
+        }
+        if n.count == 4, n.hasPrefix("S"), n.hasSuffix("IN"), let u = Int(n.dropFirst().prefix(1)), (0..<4).contains(u) {
+            lpc.uarts[u].receive([UInt8(truncatingIfNeeded: value.int)])
+            return true
+        }
+        return false
+    }
+
+    func symbol(_ name: String) -> (address: UInt32, size: Int, isFunction: Bool)? {
+        guard let s = product?.image.symbol(named: name) else { return nil }
+        return (s.address, [1, 2, 4].contains(Int(s.size)) ? Int(s.size) : 4, s.isFunction)
+    }
+
+    var cycles: UInt64 { simulator?.cpu.cycles ?? 0 }
+
+    func output(_ text: String) {
+        var lines = text.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+        for line in lines { appendLog(line) }
+    }
+
+    func debuggerCommand(_ line: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let workspace = self.workspace else { return }
+            self.execute(command: line, workspace: workspace)
+        }
+    }
+
+    func map(base: UInt32, size: UInt32, access: String) {
+        guard let memory = simulator?.memory else { return }
+        if let existing = memory.region(containing: base) {
+            appendLog(String(format: "MAP: 0x%08X is already mapped (%@)", base, existing.name))
+            return
+        }
+        if access.contains("WRITE") || access.isEmpty {
+            _ = memory.addRAM(name: "MAP", base: base, size: size)
+        } else {
+            _ = memory.addROM(name: "MAP", base: base, size: size)
+        }
+    }
+
+    func resolvePath(_ path: String) -> URL? {
+        let cleaned = path.replacingOccurrences(of: "\\", with: "/")
+        let base = workspaceDirectory ?? product?.axfURL.deletingLastPathComponent()
+        let url = cleaned.hasPrefix("/") ? URL(fileURLWithPath: cleaned) : base?.appendingPathComponent(cleaned).standardizedFileURL
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    var shouldAbort: Bool { stopRequested }
 }
 
 func hex(_ v: UInt32) -> String { String(format: "0x%08X", v) }
