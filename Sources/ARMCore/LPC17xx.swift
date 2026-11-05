@@ -600,6 +600,9 @@ public final class LPC17xx {
     public let dac = LPCDAC()
     public let lcd = LandTigerLCD()
     public let ssp1 = LPCSSP()
+    public let canFilter = LPCCANAcceptanceFilter()
+    public lazy var canBus = LPCCANBus(filter: canFilter)
+    public let can = [LPCCANController(number: 1), LPCCANController(number: 2)]
     public let touch = LandTigerTouch()
     private var touchSelected = false
     public let pinConnect = GenericPeripheralDevice()
@@ -636,6 +639,13 @@ public final class LPC17xx {
             if lpc.touch.point != nil { lpc.gpio.input[2] &= ~(1 << 13) } else { lpc.gpio.input[2] |= 1 << 13 }
         }
         memory.addMMIO(name: "SSP1", base: 0x4003_0000, size: 0x4000, device: lpc.ssp1)
+        memory.addMMIO(name: "CANAF_RAM", base: 0x4003_8000, size: 0x4000, device: LPCCANAcceptanceFilter.RAM(lpc.canFilter))
+        memory.addMMIO(name: "CANAF", base: 0x4003_C000, size: 0x4000, device: lpc.canFilter)
+        for (controller, base) in zip(lpc.can, [UInt32(0x4004_4000), 0x4004_8000]) {
+            controller.system = system
+            lpc.canBus.attach(controller)
+            memory.addMMIO(name: "CAN\(controller.number)", base: base, size: 0x4000, device: controller)
+        }
         lpc.adc.system = system
         lpc.adc.control = lpc.systemControl
         lpc.dac.cpu = sim.cpu

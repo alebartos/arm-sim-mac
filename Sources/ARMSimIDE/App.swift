@@ -374,9 +374,11 @@ extension SmokeTest {
                 let env = ProcessInfo.processInfo.environment
                 let start = env["ARMSIM_SMOKE_TOUCH_START"].flatMap(Double.init) ?? 0.5
                 let hold = env["ARMSIM_SMOKE_TOUCH_HOLD"].flatMap(Double.init) ?? 0.4
+                let gap = env["ARMSIM_SMOKE_TOUCH_GAP"].flatMap(Double.init) ?? hold
                 for (i, p) in touches.enumerated() {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + start + Double(i) * 2 * hold) { d.setTouch(p) }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + start + hold + Double(i) * 2 * hold) { d.setTouch(nil) }
+                    let at = start + Double(i) * (hold + gap)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + at) { d.setTouch(p) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + at + hold) { d.setTouch(nil) }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                     d.stop()
@@ -390,13 +392,20 @@ extension SmokeTest {
                 say("system viewer: \(SystemViewerState.shared.svd.map { "\($0.name), \($0.peripherals.count) peripherals" } ?? "no SVD")")
                 say("debugger log: \(d.commandLog.suffix(3))")
                 if let lpc = d.lpc {
+                    for name in (ProcessInfo.processInfo.environment["ARMSIM_SMOKE_DUMP"] ?? "").split(separator: ",") {
+                        if let sym = ws.lastProduct?.image.symbol(named: String(name)) {
+                            let bytes = d.readMemory(sym.address, count: Int(min(max(sym.size, 4), 64)))
+                            say("\(name) @0x\(String(sym.address, radix: 16)): " + bytes.map { $0.map { String(format: "%02X", $0) } ?? "??" }.joined(separator: " "))
+                        }
+                    }
+                    say("CAN frames: \(lpc.canBus.log.count), last: \(lpc.canBus.log.last.map { "CAN\($0.controller) id \($0.frame.id) A=\(String($0.frame.dataA, radix: 16))" } ?? "-")")
                     say(String(format: "RIT ctrl 0x%X cmp 0x%X cnt 0x%X mask 0x%X; T0 tc 0x%X", lpc.rit.controlRegister, lpc.rit.compare,
                                lpc.rit.counter, lpc.rit.compareMask, lpc.timers[0].counter))
                 }
                 say("lpc models: \(d.lpc != nil), executed addresses: \(d.executedAddresses.count)")
                 if let lpc = d.lpc {
-                    say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X, P1 in 0x%08X, %llu cycles", lpc.gpio.output[2] & 0xFF,
-                               lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5], lpc.gpio.input[1], d.snapshot.cycles))
+                    say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X, P1 in 0x%08X, P2 in 0x%08X, %llu cycles", lpc.gpio.output[2] & 0xFF,
+                               lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5], lpc.gpio.input[1], lpc.gpio.input[2], d.snapshot.cycles))
                 }
                 if let frame = d.lcdFrame, let image = LCDImage.make(frame) {
                     let rep = NSBitmapImageRep(cgImage: image)
