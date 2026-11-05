@@ -33,7 +33,7 @@ public class WordDevice: MMIODevice {
 }
 
 public enum LPCPeripheralClock {
-    case timer0, timer1, timer2, timer3, rit
+    case timer0, timer1, timer2, timer3, rit, adc, dac
 }
 
 // MARK: - System control (0x400FC000)
@@ -92,6 +92,8 @@ public final class LPCSystemControl: WordDevice {
         case .timer2: field = ((registers[0x1AC] ?? 0) >> 12) & 3
         case .timer3: field = ((registers[0x1AC] ?? 0) >> 14) & 3
         case .rit: field = ((registers[0x1AC] ?? 0) >> 26) & 3
+        case .adc: field = ((registers[0x1A8] ?? 0) >> 24) & 3
+        case .dac: field = ((registers[0x1A8] ?? 0) >> 22) & 3
         }
         return [4, 1, 2, 8][Int(field)]
     }
@@ -432,6 +434,150 @@ public final class LPCUART: WordDevice {
 // MARK: - Device setup
 
 /// The LPC17xx peripherals wired to a simulator (LandTiger board).
+
+// MARK: - ADC (0x40034000)
+
+/// 12-bit A/D converter, 8 channels (UM10360 chapter 29). A conversion takes 65 ADC clocks
+/// (PCLK_ADC / (CLKDIV + 1)); software start (START = 001) or BURST mode.
+/// LandTiger: the potentiometer is on AD0.5 (P1.31).
+public final class LPCADC: WordDevice, ClockedDevice {
+    weak var control: LPCSystemControl?
+    weak var system: SystemControl?
+    static let irq = 22
+    /// Analog input of each channel as a 12-bit value (0 = 0 V, 0xFFF = VREFP).
+    public var inputs = [UInt16](repeating: 0x800, count: 8)
+    public private(set) var controlRegister: UInt32 = 0x1 // ADCR
+    public private(set) var interruptEnable: UInt32 = 0x100 // ADINTEN
+    private var data = [UInt32](repeating: 0, count: 8)   // ADDR0-7
+    private var global: UInt32 = 0                         // ADGDR
+    private var trim: UInt32 = 0x0000_0F00                 // ADTRM
+    /// Processor cycles left in the conversion under way (nil = idle) and its channel.
+    private var remaining: UInt64?
+    private var channel = 0
+
+    private var powered: Bool { controlRegister & (1 << 21) != 0 }
+    private var burst: Bool { controlRegister & (1 << 16) != 0 }
+    private var selected: UInt32 { controlRegister & 0xFF }
+
+    private var conversionCycles: UInt64 {
+        let clkdiv = UInt64((controlRegister >> 8) & 0xFF) + 1
+        return 65 * clkdiv * (control?.divider(.adc) ?? 4)
+    }
+
+    override func readWord(_ offset: UInt32) -> UInt32 {
+        switch offset {
+        case 0x00: return controlRegister
+        case 0x04:
+            let value = global
+            global &= ~(3 << 30) // reading clears DONE / OVERRUN
+            return value
+        case 0x0C: return interruptEnable
+        case 0x10...0x2C:
+            let n = Int(offset - 0x10) / 4
+            let value = data[n]
+            data[n] &= ~(3 << 30)
+            return value
+        case 0x30: return status
+        case 0x34: return trim
+        default: return 0
+        }
+    }
+
+    override func peekWord(_ offset: UInt32) -> UInt32 {
+        switch offset {
+        case 0x04: return global
+        case 0x10...0x2C: return data[Int(offset - 0x10) / 4]
+        default: return readWord(offset)
+        }
+    }
+
+    /// ADSTAT: DONE0-7, OVERRUN0-7, ADINT.
+    private var status: UInt32 {
+        var done: UInt32 = 0, overrun: UInt32 = 0
+        for n in 0..<8 {
+            if data[n] & (1 << 31) != 0 { done |= 1 << UInt32(n) }
+            if data[n] & (1 << 30) != 0 { overrun |= 1 << UInt32(n) }
+        }
+        let interrupt = (interruptEnable & 0x100 != 0 && global & (1 << 31) != 0) || done & interruptEnable & 0xFF != 0
+        return done | (overrun << 8) | (interrupt ? 1 << 16 : 0)
+    }
+
+    override func writeWord(_ offset: UInt32, _ value: UInt32, mask: UInt32) {
+        switch offset {
+        case 0x00:
+            controlRegister = merge(controlRegister, value, mask) & 0x0F2F_FFFF
+            if !powered || selected == 0 { remaining = nil; return }
+            if burst {
+                if remaining == nil { startNext(after: -1) }
+            } else if (controlRegister >> 24) & 7 == 1 {
+                // START = 001: convert the lowest selected channel now.
+                startNext(after: -1)
+            }
+        case 0x0C: interruptEnable = merge(interruptEnable, value, mask) & 0x1FF
+        case 0x34: trim = merge(trim, value, mask)
+        default: break
+        }
+    }
+
+    private func startNext(after previous: Int) {
+        let sel = selected
+        guard sel != 0 else { remaining = nil; return }
+        var n = (previous + 1) % 8
+        while sel & (1 << UInt32(n)) == 0 { n = (n + 1) % 8 }
+        channel = n
+        remaining = conversionCycles
+    }
+
+    private func complete() {
+        let value = UInt32(inputs[channel] & 0xFFF) << 4
+        let overrun: UInt32 = data[channel] & (1 << 31) != 0 ? 1 << 30 : 0
+        data[channel] = value | (1 << 31) | overrun
+        global = value | (UInt32(channel) << 24) | (1 << 31) | (global & (1 << 31) != 0 ? 1 << 30 : 0)
+        if !burst { controlRegister &= ~(7 << 24) } // START returns to 000
+        if (interruptEnable & 0x100 != 0) || interruptEnable & (1 << UInt32(channel)) != 0 {
+            system?.setPending(irq: Self.irq)
+        }
+    }
+
+    public func tick(_ cycles: UInt64) {
+        var left = cycles
+        while let r = remaining, powered {
+            if left < r { remaining = r - left; return }
+            left -= r
+            remaining = nil
+            complete()
+            if burst { startNext(after: channel) } else { return }
+        }
+    }
+
+    public func cyclesUntilEvent() -> UInt64? { powered ? remaining : nil }
+}
+
+// MARK: - DAC (0x4008C000)
+
+/// 10-bit D/A converter on AOUT (P0.26), the LandTiger loudspeaker. The output follows DACR at once.
+public final class LPCDAC: WordDevice {
+    public private(set) var dacr: UInt32 = 0
+    private var other: [UInt32: UInt32] = [:]
+    /// Output samples (CPU cycle, 10-bit value), oldest first, for the board view / analyzer.
+    public private(set) var samples: [(cycle: UInt64, value: UInt16)] = []
+    weak var cpu: CPU?
+
+    /// Current output, 0...1023 (VALUE field, DACR[15:6]).
+    public var value: UInt16 { UInt16((dacr >> 6) & 0x3FF) }
+
+    override func readWord(_ offset: UInt32) -> UInt32 {
+        offset == 0 ? dacr : other[offset] ?? 0
+    }
+
+    override func writeWord(_ offset: UInt32, _ value: UInt32, mask: UInt32) {
+        guard offset == 0 else { other[offset] = merge(other[offset] ?? 0, value, mask); return }
+        dacr = merge(dacr, value, mask) & 0x0001_FFC0
+        samples.append((cpu?.cycles ?? 0, self.value))
+        if samples.count > 4096 { samples.removeFirst(samples.count - 4096) }
+    }
+}
+
 public final class LPC17xx {
     public let systemControl = LPCSystemControl()
     public let gpio = LPCGPIO()
@@ -440,6 +586,8 @@ public final class LPC17xx {
         LPCTimer(index: 2, irq: 3, clock: .timer2), LPCTimer(index: 3, irq: 4, clock: .timer3),
     ]
     public let rit = LPCRIT()
+    public let adc = LPCADC()
+    public let dac = LPCDAC()
     public let pinConnect = GenericPeripheralDevice()
     public let uarts = [LPCUART(index: 0, irq: 5), LPCUART(index: 1, irq: 6), LPCUART(index: 2, irq: 7), LPCUART(index: 3, irq: 8)]
 
@@ -464,11 +612,16 @@ public final class LPC17xx {
         memory.addMMIO(name: "TIMER3", base: 0x4009_4000, size: 0x4000, device: lpc.timers[3])
         memory.addMMIO(name: "RIT", base: 0x400B_0000, size: 0x4000, device: lpc.rit)
         memory.addMMIO(name: "PINCON", base: 0x4002_C000, size: 0x4000, device: lpc.pinConnect)
+        lpc.adc.system = system
+        lpc.adc.control = lpc.systemControl
+        lpc.dac.cpu = sim.cpu
+        memory.addMMIO(name: "ADC", base: 0x4003_4000, size: 0x4000, device: lpc.adc)
+        memory.addMMIO(name: "DAC", base: 0x4008_C000, size: 0x4000, device: lpc.dac)
         for (uart, base) in zip(lpc.uarts, [UInt32(0x4000_C000), 0x4001_0000, 0x4009_8000, 0x4009_C000]) {
             uart.system = system
             memory.addMMIO(name: "UART\(uart.index)", base: base, size: 0x4000, device: uart)
         }
-        sim.cpu.clockedDevices += lpc.timers as [ClockedDevice] + [lpc.rit]
+        sim.cpu.clockedDevices += lpc.timers as [ClockedDevice] + [lpc.rit, lpc.adc]
         return lpc
     }
 

@@ -338,6 +338,7 @@ extension SmokeTest {
         say("targets: \(ws.uvTargets), active \(ws.uvTargetIndex)")
         say("imported: \(ws.project.map { "\($0.name), device \($0.options.device), groups \($0.groups.map(\.name)), files \($0.groups.flatMap(\.files))" } ?? "nil")")
         let useKeil = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_KEIL"] != nil
+        if let pot = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_POT"].flatMap(Double.init) { d.potentiometer = pot }
         say("keil image: \(ws.keilImageURL?.path ?? "none")")
         say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
         if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }
@@ -370,6 +371,10 @@ extension SmokeTest {
                 say("pack: \(ws.project?.options.packID ?? "none"), svd: \(ws.project?.options.svdPath ?? "none")")
                 say("system viewer: \(SystemViewerState.shared.svd.map { "\($0.name), \($0.peripherals.count) peripherals" } ?? "no SVD")")
                 say("lpc models: \(d.lpc != nil), executed addresses: \(d.executedAddresses.count)")
+                if let lpc = d.lpc {
+                    say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X", lpc.gpio.output[2] & 0xFF,
+                               lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5]))
+                }
                 if let window = NSApp.windows.first(where: { $0.isVisible }), let view = window.contentView,
                    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                     view.cacheDisplay(in: view.bounds, to: rep)

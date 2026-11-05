@@ -87,6 +87,32 @@ struct LandTigerWindow: View {
                 button("KEY1", index: 1, pin: "P2.11")
                 button("KEY2", index: 2, pin: "P2.12")
             }
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Potentiometer").font(.system(size: 10, weight: .semibold))
+                    Text("AD0.5 (P1.31)").font(.system(size: 8)).foregroundColor(.secondary)
+                }
+                Slider(value: Binding(get: { debugger.potentiometer }, set: { debugger.setPotentiometer($0) }), in: 0...1)
+                    .frame(width: 170)
+                Text(String(format: "0x%03X", Int((debugger.potentiometer * 4095).rounded())))
+                    .font(.system(size: 10, design: .monospaced)).frame(width: 44, alignment: .leading)
+            }
+            let _ = debugger.revision
+            let dac = Double(debugger.lpc?.dac.value ?? 0) / 1023
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Speaker").font(.system(size: 10, weight: .semibold))
+                    Text("AOUT (P0.26)").font(.system(size: 8)).foregroundColor(.secondary)
+                }
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3).fill(Color(white: 0.88))
+                        RoundedRectangle(cornerRadius: 3).fill(Color.accentColor).frame(width: g.size.width * dac)
+                    }
+                }
+                .frame(width: 170, height: 8)
+                Text(String(format: "%.2f V", dac * 3.3)).font(.system(size: 10, design: .monospaced)).frame(width: 44, alignment: .leading)
+            }
             Text("Hold a button to keep it pressed. Buttons raise EINT0-2 when P2.10-12 are configured as EINT in PINSEL4, otherwise they drive the GPIO input low.")
                 .font(.system(size: 10)).foregroundColor(.secondary).multilineTextAlignment(.center)
                 .frame(width: 380)
@@ -95,7 +121,7 @@ struct LandTigerWindow: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 420, minHeight: 260)
+        .frame(minWidth: 420, minHeight: 320)
     }
 
     private func button(_ title: String, index: Int, pin: String) -> some View {

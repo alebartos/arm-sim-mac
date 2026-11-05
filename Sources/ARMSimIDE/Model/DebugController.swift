@@ -55,6 +55,8 @@ final class DebugController: ObservableObject {
     /// LPC17xx peripheral models (nil for other devices).
     private(set) var lpc: LPC17xx?
     @Published var buttonsHeld = Set<Int>()
+    /// LandTiger potentiometer (AD0.5), 0...1 of VREFP.
+    @Published var potentiometer = 0.5
     /// Addresses executed at least once (code coverage), updated when stopped.
     @Published private(set) var executedAddresses = Set<UInt32>()
     @Published private(set) var executionCounts: [UInt32: UInt64] = [:]
@@ -77,6 +79,13 @@ final class DebugController: ObservableObject {
     }
 
     /// LandTiger buttons: 0 = INT0 (EINT0), 1 = KEY1 (EINT1), 2 = KEY2 (EINT2).
+    func setPotentiometer(_ value: Double) {
+        potentiometer = min(max(value, 0), 1)
+        guard let lpc else { return }
+        let raw = UInt16((potentiometer * 4095).rounded())
+        queue.async { lpc.adc.inputs[5] = raw }
+    }
+
     func setButton(_ index: Int, pressed: Bool) {
         if pressed { buttonsHeld.insert(index) } else { buttonsHeld.remove(index) }
         guard let lpc else { return }
@@ -175,6 +184,7 @@ final class DebugController: ObservableObject {
         let sim = Simulator(arch: product.device.architecture, memory: memory)
         // Behavioural peripheral models where available (LandTiger / LPC17xx)...
         lpc = product.device.name.uppercased().hasPrefix("LPC17") ? LPC17xx.install(on: sim) : nil
+        lpc?.adc.inputs[5] = UInt16((potentiometer * 4095).rounded())
         // ...and generic registers (hold written values) for the rest of the peripheral space.
         let generic = GenericPeripheralDevice()
         memory.addMMIOFillingGaps(name: "Peripherals", base: 0x4000_0000, size: 0x2000_0000, device: generic)
