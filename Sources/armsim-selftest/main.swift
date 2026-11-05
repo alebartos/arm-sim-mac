@@ -714,14 +714,23 @@ text            DCB     "Keil", 0
                 END
 """
 
-func runArmasmTest() throws -> String? {
-    let translation = ArmasmTranslator.translate(armasmProgram)
-    if let error = translation.diagnostics.first(where: { $0.isError }) { return "line \\(error.line): \\(error.message)" }
-    guard translation.text.components(separatedBy: "\\n").count == armasmProgram.components(separatedBy: "\\n").count else {
-        return "line count changed"
+/// Assembles armasm source either natively or through ArmasmTranslator + clang.
+func armasmObject(_ source: String, native: Bool) throws -> [UInt8] {
+    if native {
+        let output = ArmasmAssembler.assemble(source: source, path: workDir.appendingPathComponent("test.s").path)
+        if let error = output.diagnostics.first(where: \.isError) { throw ToolError(description: "line \(error.line): \(error.message)") }
+        return output.object!
     }
-    let profile = profiles[0]
-    let object = try compile(translation.text, ext: "s", profile: profile, extraFlags: ["-mimplicit-it=always"])
+    let translation = ArmasmTranslator.translate(source)
+    if let error = translation.diagnostics.first(where: { $0.isError }) { throw ToolError(description: "line \(error.line): \(error.message)") }
+    guard translation.text.components(separatedBy: "\n").count == source.components(separatedBy: "\n").count else {
+        throw ToolError(description: "line count changed")
+    }
+    return try compile(translation.text, ext: "s", profile: profiles[0], extraFlags: ["-mimplicit-it=always"])
+}
+
+func runArmasmTest(native: Bool) throws -> String? {
+    let object = try armasmObject(armasmProgram, native: native)
     let image = try Linker.link(objects: [(name: "startup.o", bytes: object)],
                                 layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
     let memory = MemoryMap()
@@ -820,10 +829,8 @@ RIT_IRQHandler  PROC
                 END
 """
 
-func runLPCTest() throws -> String? {
-    let translation = ArmasmTranslator.translate(lpcProgram)
-    if let error = translation.diagnostics.first(where: { $0.isError }) { return "line \(error.line): \(error.message)" }
-    let object = try compile(translation.text, ext: "s", profile: profiles[0], extraFlags: ["-mimplicit-it=always"])
+func runLPCTest(native: Bool) throws -> String? {
+    let object = try armasmObject(lpcProgram, native: native)
     let image = try Linker.link(objects: [(name: "lpc.o", bytes: object)],
                                 layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
     let memory = MemoryMap()
@@ -846,6 +853,212 @@ func runLPCTest() throws -> String? {
     if r[5] != UInt32(cycles / 4004) { return "RIT interrupts \(r[5]), expected \(cycles / 4004) after \(cycles) cycles" }
     return nil
 }
+
+
+// MARK: - Native armasm assembler: encoder vs clang
+
+/// Unified-syntax instructions assembled by both clang and the native encoder (outside IT blocks).
+let encoderCorpus: [String] = [
+    "movs r0, #3", "mov r0, #3", "mov r8, #1", "mov r1, #-1", "mov r2, #0xFF00FF00",
+    "mvn r3, #0", "movw r4, #0x1234", "movt r4, #0xBEEF", "mov r0, #0x1234", "movs r0, r1", "mov r0, r1", "mov r8, r9",
+    "mov sp, r0", "movs r8, r1", "mvns r1, r2", "mvn r1, r2", "mvn r1, r2, lsl #3",
+    "adds r0, r1, r2", "add r0, r1, r2", "add r0, r0, r1", "add r0, r1", "add r8, r1", "adds r0, r0, #1", "adds r1, r0, #1",
+    "adds r0, #200", "add r0, r0, #200", "add r0, r1, #4095", "add r0, r1, #0x10000", "add r0, r1, #-4", "adds r0, r1, #-4",
+    "add sp, sp, #16", "add sp, #508", "sub sp, sp, #8", "add r0, sp, #8", "add r8, sp, #8", "add.w r0, r1, r2, lsl #2",
+    "subs r0, r1, r2", "sub r0, r1, r2", "subs r0, #1", "sub r0, r0, #1", "subs r2, r3, #7", "sub r0, r1, #4000",
+    "addw r0, r1, #1000", "subw r0, r1, #1000", "adc r0, r1, r2", "adcs r0, r0, r1", "adcs r0, r1", "sbcs r2, r2, r3", "sbc r0, r1, #5",
+    "rsbs r0, r1, #0", "rsb r0, r1, #0", "rsb r0, r1, #10", "rsb r0, r1, r2, asr #3", "negs r0, r1",
+    "ands r0, r1", "and r0, r0, r1", "and r0, r1, #0xFF", "and r0, r1, #0xFFFFFF00", "bics r0, r0, r1", "bic r0, #0xFF000000",
+    "orrs r0, r1", "orr r0, r1, #1", "orr r0, r1, r2, ror #7", "orn r0, r1, #1", "orn r0, r1, r2", "eors r0, r1", "eor r0, r1, #0x80000000",
+    "cmp r0, #0x10", "cmp r0, #300", "cmp r0, #-1", "cmp r0, r1", "cmp r8, r1", "cmp r0, r9", "cmp r0, r1, lsl #2",
+    "cmn r0, #1", "cmn r0, r1", "tst r0, #0x40", "tst r0, r1", "teq r0, #1", "teq r0, r1",
+    "lsls r0, r1, #2", "lsl r0, r1, #2", "lsrs r0, r1, #32", "lsr r0, #16", "asrs r0, r0, #1", "asr r0, r1, #31",
+    "ror r0, r1, #4", "lsls r0, r1", "lsl r0, r0, r1", "lsl r0, r1, r2", "rors r1, r2", "rrx r0, r1", "rrxs r0, r1",
+    "muls r0, r1, r0", "mul r0, r1, r2", "muls r1, r0", "mla r0, r1, r2, r3", "mls r0, r1, r2, r3",
+    "umull r0, r1, r2, r3", "smull r0, r1, r2, r3", "umlal r0, r1, r2, r3", "smlal r0, r1, r2, r3", "sdiv r0, r1, r2", "udiv r0, r1, r2",
+    "clz r0, r1", "rbit r0, r1", "rev r0, r1", "rev r8, r1", "rev16 r0, r1", "revsh r0, r1",
+    "sxtb r0, r1", "sxth r0, r1", "uxtb r0, r1", "uxth r0, r1", "uxtb r8, r1", "uxtb r0, r1, ror #8",
+    "bfc r0, #4, #8", "bfi r0, r1, #4, #8", "sbfx r0, r1, #3, #5", "ubfx r0, r1, #0, #16", "ssat r0, #8, r1", "usat r0, #8, r1, lsl #2",
+    "ldr r0, [r1]", "ldr r0, [r1, #24]", "ldr r0, [r1, #124]", "ldr r0, [r1, #128]", "ldr r0, [r0, #-4]", "ldr r8, [r1]",
+    "ldr r0, [sp, #8]", "ldr r0, [sp, #1020]", "ldr r0, [sp, #1024]", "ldr r0, [r1, #4]!", "ldr r0, [r1], #4", "ldr r0, [r1], #-4",
+    "ldr r0, [r1, r2]", "ldr r0, [r1, r2, lsl #2]", "ldr r0, [r8, r2]", "ldr r0, [pc, #8]", "ldr.w r0, [r1]",
+    "ldrb r0, [r1, #31]", "ldrb r0, [r1, #32]", "ldrb r0, [r1, r2]", "ldrh r0, [r1, #62]", "ldrh r0, [r1, #1]", "ldrsb r0, [r1]",
+    "ldrsb r0, [r1, r2]", "ldrsh r0, [r1, #2]", "ldrsh r0, [r1, r2]", "str r0, [r1]", "str r0, [r1, #4]", "str r0, [sp, #4]",
+    "str r0, [r1, #-8]", "str r0, [sp, #-4]!", "strb r0, [r1, #3]", "strh r0, [r1, #6]", "strb r0, [r1, r2]", "strh r0, [r1, r2, lsl #1]",
+    "ldrd r0, r1, [r2]", "ldrd r0, r1, [r2, #8]", "ldrd r0, r1, [r2, #-8]!", "strd r0, r1, [r2], #16",
+    "ldrex r0, [r1]", "ldrex r0, [r1, #4]", "strex r2, r0, [r1]", "ldrexb r0, [r1]", "strexh r2, r0, [r1]", "clrex",
+    "ldrt r0, [r1, #4]", "strbt r0, [r1]",
+    "push {r4, lr}", "push {r4-r11, lr}", "push {r8}", "pop {r4, pc}", "pop {r4-r11, pc}", "pop {r8}",
+    // armasm (unlike clang) assembles STMDB/STMFD SP! {low regs, LR} as the 16-bit PUSH.
+    "stmdb sp!, {r4-r11, lr}", "ldmia sp!, {r4-r11, lr}", "ldmia r0!, {r1, r2}", "ldmia r0, {r0, r1}",
+    "stmia r0!, {r1, r2}", "ldm r0, {r1, r2}", "stmia r8!, {r1, r2}", "ldmdb r0, {r1, r2}", "stm r0, {r1, r2}",
+    "bx lr", "blx r3", "tbb [r0, r1]", "tbh [r0, r1, lsl #1]",
+    "nop", "nop.w", "wfi", "wfe", "sev", "yield", "bkpt #0", "bkpt #0xAB", "svc #0x10", "udf #1",
+    "cpsie i", "cpsid i", "cpsie f", "dmb sy", "dsb", "isb", "dmb ish",
+    "mrs r1, psp", "mrs r0, msp", "mrs r0, primask", "mrs r0, xpsr", "mrs r0, control", "msr control, r0", "msr psp, r1",
+    "msr basepri, r0", "msr apsr_nzcvq, r0", "msr primask, r0",
+]
+
+/// Thumb-1 subset for Cortex-M0 (only 16-bit forms + BL/MRS/MSR/barriers).
+let encoderCorpusM0: [String] = [
+    "movs r0, #3", "mov r0, r1", "mov r8, r9", "adds r0, r1, r2", "adds r0, #200", "add r0, r8", "subs r0, #1",
+    "add sp, #16", "sub sp, #8", "add r0, sp, #8", "ands r0, r1", "lsls r0, r1, #2", "lsrs r0, r1", "muls r1, r0",
+    "ldr r0, [r1, #4]", "ldr r0, [sp, #8]", "ldrb r0, [r1, r2]", "ldrsh r0, [r1, r2]", "strh r0, [r1, #6]",
+    "push {r4-r7, lr}", "pop {r4-r7, pc}", "ldmia r0!, {r1, r2}", "stmia r0!, {r1, r2}", "cmp r0, #10", "cmp r8, r0",
+    "sxtb r0, r1", "rev r0, r1", "cpsid i", "mrs r0, primask", "msr primask, r0", "dmb", "dsb", "isb", "svc #1", "bkpt #3",
+]
+
+func clangBytes(_ lines: [String], profile: Profile) throws -> [[UInt8]] {
+    var source = ".syntax unified\n.thumb\n.text\n"
+    for (i, line) in lines.enumerated() { source += "L\(i):\n    \(line)\n" }
+    source += "Lend:\n    nop\n"
+    let object = try compile(source, ext: "s", profile: profile)
+    let objectURL = workDir.appendingPathComponent("enc-\(profile.name).o")
+    try Data(object).write(to: objectURL)
+    let symbols = try run(["xcrun", "llvm-objdump", "-t", objectURL.path])
+    var offsets: [Int: Int] = [:]
+    var end = 0
+    for line in symbols.split(separator: "\n") {
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+        guard let name = parts.last, let address = Int(parts.first ?? "", radix: 16) else { continue }
+        if name == "Lend" { end = address }
+        if name.hasPrefix("L"), let n = Int(name.dropFirst()) { offsets[n] = address }
+    }
+    let text = try run(["xcrun", "llvm-objdump", "-s", "--section=.text", objectURL.path])
+    var bytes: [UInt8] = []
+    for line in text.split(separator: "\n") where line.hasPrefix(" ") {
+        let fields = line.split(separator: " ", omittingEmptySubsequences: true).dropFirst().prefix(4)
+        for f in fields where f.count % 2 == 0 && f.allSatisfy(\.isHexDigit) {
+            var k = f.startIndex
+            while k < f.endIndex {
+                let next = f.index(k, offsetBy: 2)
+                bytes.append(UInt8(f[k..<next], radix: 16)!)
+                k = next
+            }
+        }
+    }
+    return lines.indices.map { i in
+        let start = offsets[i] ?? 0
+        let stop = i + 1 < lines.count ? offsets[i + 1] ?? end : end
+        return Array(bytes[start..<min(stop, bytes.count)])
+    }
+}
+
+func runEncoderCorpus(_ lines: [String], profile: Profile) throws -> String? {
+    let expected = try clangBytes(lines, profile: profile)
+    var problems: [String] = []
+    for (i, line) in lines.enumerated() {
+        let hex = { (b: [UInt8]) in b.map { String(format: "%02x", $0) }.joined() }
+        do {
+            let ours = try ArmasmAssembler.assembleInstruction(line, arch: profile.arch)
+            if ours != expected[i] { problems.append("'\(line)': ours \(hex(ours)), clang \(hex(expected[i]))") }
+        } catch {
+            problems.append("'\(line)': \(error)")
+        }
+    }
+    return problems.isEmpty ? nil : "\(problems.count) mismatches:\n      " + problems.joined(separator: "\n      ")
+}
+
+/// Exercises the armasm features clang never sees: macros, WHILE, SETA, numeric labels, pools.
+let armasmFeatureProgram = """
+                GBLA    count
+count           SETA    0
+                MACRO
+$lbl            ADDK    $reg, $value=1
+$lbl            ADD     $reg, $reg, #$value
+                MEND
+                AREA    STACK, NOINIT, READWRITE, ALIGN=3
+                SPACE   0x100
+__initial_sp
+                AREA    RESET, DATA, READONLY
+                DCD     __initial_sp, Reset_Handler
+                AREA    |.text|, CODE, READONLY
+                THUMB
+Reset_Handler   PROC
+                MOV     R0, #0
+                WHILE   count < 5
+                ADDK    R0, count
+count           SETA    count + 1
+                WEND                            ; R0 = 0+1+2+3+4 = 10
+                ADDK    R0                      ; default parameter: 11
+                IF      count = 5 :LAND: {TRUE}
+                MOV     R1, #(3 :SHL: 2) + 1    ; 13
+                ELSE
+                MOV     R1, #0
+                ENDIF
+                MOV     R2, #3
+1               SUBS    R2, R2, #1
+                BNE     %B1                     ; numeric local label
+                LDR     R3, =0x12345678
+                LDR     R4, =0x12345678         ; same pool entry
+                CMP     R0, #11
+                MOVEQ   R5, #1                  ; implicit IT
+                MOVNE   R5, #2
+                LDR     R6, =table
+                LDR     R6, [R6, #4]
+                ADR     R7, table
+                LDR     R7, [R7, #(table_end - table - 4)]
+                MOV32   R8, 0xCAFEF00D
+                BL      helper
+                BKPT    0
+                ENDP
+helper          PROC
+                CBZ     R0, %F2
+                MOV     R9, #0x77
+2               BX      LR
+                ENDP
+                LTORG
+                ALIGN   4
+table           DCD     1, 2, 3, 0x42
+table_end
+                END
+"""
+
+func runArmasmFeatureTest() throws -> String? {
+    let object = try armasmObject(armasmFeatureProgram, native: true)
+    let image = try Linker.link(objects: [(name: "features.o", bytes: object)],
+                                layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
+    let memory = MemoryMap()
+    memory.addROM(name: "IROM1", base: 0, size: 0x8_0000)
+    memory.addRAM(name: "IRAM1", base: 0x1000_0000, size: 0x8000)
+    let sim = Simulator(arch: .armv7m, memory: memory)
+    try sim.load(image)
+    try sim.reset(vectorTable: 0)
+    let reason = sim.cpu.run(maxInstructions: 10_000)
+    guard case .bkpt(0, _) = reason else { return "stopped with \(reason)" }
+    let r = sim.cpu.r
+    let expected: [(Int, UInt32)] = [(0, 11), (1, 13), (2, 0), (3, 0x1234_5678), (4, 0x1234_5678), (5, 1), (6, 2),
+                                     (7, 0x42), (8, 0xCAFE_F00D), (9, 0x77)]
+    for (i, value) in expected where r[i] != value {
+        return String(format: "R%d = 0x%X, expected 0x%X", i, r[i], value)
+    }
+    return nil
+}
+
+/// The LandTiger course template (01_SVC) must link to the same bytes as Keil's own SVC.axf.
+func runKeilTemplateTest() throws -> String? {
+    let output = ArmasmAssembler.assemble(fileAt: "01_SVC/Source/template.s")
+    if let error = output.diagnostics.first(where: \.isError) { return "line \(error.line): \(error.message)" }
+    let ours = try Linker.link(objects: [(name: "template.o", bytes: output.object!)],
+                               layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
+    let keil = try ELFLoader.parse([UInt8](try Data(contentsOf: URL(fileURLWithPath: "01_SVC/Objects/SVC.axf"))))
+    func flat(_ image: ELFImage) -> [UInt32: UInt8] {
+        var bytes: [UInt32: UInt8] = [:]
+        for s in image.segments where !s.isZeroInitialized && s.address < 0x1000_0000 {
+            for (k, b) in s.bytes.enumerated() { bytes[s.address + UInt32(k)] = b }
+        }
+        return bytes
+    }
+    let a = flat(ours), b = flat(keil)
+    for address in b.keys.sorted() where (a[address] ?? 0) != b[address] {
+        return String(format: "byte at 0x%X differs: 0x%02X, Keil 0x%02X", address, a[address] ?? 0, b[address]!)
+    }
+    for address in a.keys.sorted() where b[address] == nil && a[address] != 0 {
+        return String(format: "extra byte at 0x%X", address)
+    }
+    return nil
+}
+
 
 // MARK: - Main
 
@@ -875,9 +1088,19 @@ for test in asmTests {
 }
 
 print("\n== Keil armasm syntax")
-report("[M3] armasm startup + SVC + tables (LPC1768 layout)") { try runArmasmTest() }
+report("[M3] armasm startup + SVC + tables (LPC1768 layout)") { try runArmasmTest(native: false) }
 
-report("[M3] LPC17xx PLL lock, TIMER0 + RIT interrupts, WFI, GPIO (LandTiger)") { try runLPCTest() }
+report("[M3] LPC17xx PLL lock, TIMER0 + RIT interrupts, WFI, GPIO (LandTiger)") { try runLPCTest(native: false) }
+
+print("\n== Native armasm assembler")
+report("[M3] encoder vs clang (\(encoderCorpus.count) instructions)") { try runEncoderCorpus(encoderCorpus, profile: profiles[0]) }
+report("[M3] native: armasm startup + SVC + tables") { try runArmasmTest(native: true) }
+report("[M3] native: LPC17xx timers, interrupts, GPIO") { try runLPCTest(native: true) }
+report("[M3] native: macros, WHILE, IF, local labels, literal pools, implicit IT") { try runArmasmFeatureTest() }
+if FileManager.default.fileExists(atPath: "01_SVC/Objects/SVC.axf") {
+    report("[M3] native: 01_SVC template links byte-identical to Keil's SVC.axf") { try runKeilTemplateTest() }
+}
+report("[M0] encoder vs clang (\(encoderCorpusM0.count) instructions)") { try runEncoderCorpus(encoderCorpusM0, profile: profiles[1]) }
 
 print("\n== Differential C tests (simulator vs native Mac)")
 for test in cTests {
