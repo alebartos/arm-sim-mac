@@ -1161,6 +1161,31 @@ let encoderCorpusM0: [String] = [
     "sxtb r0, r1", "rev r0, r1", "cpsid i", "mrs r0, primask", "msr primask, r0", "dmb", "dsb", "isb", "svc #1", "bkpt #3",
 ]
 
+/// Cortex-M4F: DSP extension and FPv4-SP instructions.
+let encoderCorpusM4F: [String] = [
+    "sadd16 r0, r1, r2", "uqsub8 r3, r4, r5", "shasx r0, r1, r2", "uhsax r8, r9, r10", "qadd8 r0, r1, r2", "usub16 r0, r1, r2",
+    "qadd r0, r1, r2", "qdsub r0, r1, r2", "qdadd r4, r5, r6", "sel r0, r1, r2", "ssat16 r0, #8, r1", "usat16 r0, #4, r1",
+    "smlabt r0, r1, r2, r3", "smultt r0, r1, r2", "smulbb r4, r5, r6", "smlad r0, r1, r2, r3", "smladx r0, r1, r2, r3",
+    "smuad r0, r1, r2", "smusdx r0, r1, r2", "smlsd r0, r1, r2, r3", "smlawt r0, r1, r2, r3", "smulwb r0, r1, r2",
+    "smmla r0, r1, r2, r3", "smmlar r0, r1, r2, r3", "smmls r0, r1, r2, r3", "smmulr r0, r1, r2", "smmul r0, r1, r2",
+    "usad8 r0, r1, r2", "usada8 r0, r1, r2, r3", "smlalbt r0, r1, r2, r3", "smlald r0, r1, r2, r3",
+    "smlsldx r0, r1, r2, r3", "umaal r0, r1, r2, r3", "pkhbt r0, r1, r2, lsl #8", "pkhtb r0, r1, r2, asr #16",
+    "sxtab r0, r1, r2, ror #8", "uxtah r0, r1, r2", "sxtb16 r0, r1", "uxtab16 r0, r1, r2, ror #16",
+    "vadd.f32 s0, s1, s2", "vsub.f32 s31, s30, s29", "vmul.f32 s3, s4, s5", "vdiv.f32 s6, s7, s8", "vnmul.f32 s0, s1, s2",
+    "vmla.f32 s0, s1, s2", "vmls.f32 s0, s1, s2", "vnmla.f32 s0, s1, s2", "vnmls.f32 s0, s1, s2",
+    "vfma.f32 s0, s1, s2", "vfms.f32 s0, s1, s2", "vfnma.f32 s0, s1, s2", "vfnms.f32 s0, s1, s2",
+    "vabs.f32 s0, s1", "vneg.f32 s2, s3", "vsqrt.f32 s4, s5", "vmov.f32 s0, s31", "vmov.f32 s0, #1.5",
+    "vmov.f32 s5, #-0.125", "vmov.f32 s7, #31.0", "vmov.f32 s1, #0.25",
+    "vcmp.f32 s0, s1", "vcmpe.f32 s2, s3", "vcmp.f32 s0, #0", "vcmpe.f32 s5, #0",
+    "vcvt.s32.f32 s0, s1", "vcvtr.s32.f32 s0, s1", "vcvt.u32.f32 s2, s3", "vcvt.f32.s32 s0, s1", "vcvt.f32.u32 s4, s5",
+    "vcvt.s16.f32 s0, s0, #8", "vcvt.f32.u32 s2, s2, #20", "vcvt.s32.f32 s3, s3, #1", "vcvt.f32.u16 s9, s9, #16",
+    "vcvtb.f16.f32 s0, s1", "vcvtt.f32.f16 s0, s1",
+    "vmov r0, s1", "vmov s3, r2", "vmov r0, r1, d2", "vmov d3, r4, r5", "vmov s0, s1, r2, r3", "vmov r2, r3, s4, s5",
+    "vmrs APSR_nzcv, fpscr", "vmrs r3, fpscr", "vmsr fpscr, r0",
+    "vldr s0, [r0, #8]", "vstr s31, [sp, #1020]", "vldr d1, [r2, #-16]", "vstr d15, [r1]",
+    "vpush {s16-s31}", "vpop {d8-d15}", "vldmia r0!, {s0-s3}", "vstmdb sp!, {s4-s5}", "vldm r1, {d0-d1}", "vstmia r2, {s7}",
+]
+
 func clangBytes(_ lines: [String], profile: Profile) throws -> [[UInt8]] {
     var source = ".syntax unified\n.thumb\n.text\n"
     for (i, line) in lines.enumerated() { source += "L\(i):\n    \(line)\n" }
@@ -1411,6 +1436,68 @@ func runArmasmFeatureTest() throws -> String? {
     return nil
 }
 
+/// Keil-syntax Cortex-M4F program: FPU + DSP through the native assembler, then run.
+let armasmFPUProgram = """
+                AREA    RESET, DATA, READONLY
+__Vectors       DCD     0x10001000
+                DCD     Reset_Handler
+
+                AREA    |.text|, CODE, READONLY
+                THUMB
+Reset_Handler   PROC
+                LDR     R0, =0xE000ED88        ; CPACR: enable CP10/CP11
+                LDR     R1, [R0]
+                ORR     R1, R1, #0x00F00000
+                STR     R1, [R0]
+                DSB
+                ISB
+                VLDR.F32 S0, pi                ; literal next to the code
+                VMOV.F32 S1, #2.0
+                VMUL.F32 S2, S0, S1            ; 2 pi
+                VMOV    R4, S2
+                VCMP.F32 S2, S0
+                VMRS    APSR_nzcv, FPSCR
+                VADDGT.F32 S3, S1, S1          ; implicit IT: 4.0
+                VMOVLE.F32 S3, #1.0
+                VMOV    R5, S3
+                VPUSH   {S16-S17}
+                VPOP    {S18-S19}
+                VCVT.S32.F32 S4, S2
+                VMOV    R6, S4                 ; 6
+                LDR     R1, =0x00030002
+                LDR     R2, =0x00050004
+                SMUAD   R7, R1, R2             ; 2*4 + 3*5 = 23
+                SADD16  R8, R1, R2             ; 0x00080006
+                BKPT    0
+                ENDP
+                ALIGN   4
+pi              DCD     0x40490FDB
+                END
+"""
+
+func runArmasmFPUTest() throws -> String? {
+    let output = ArmasmAssembler.assemble(source: armasmFPUProgram, path: workDir.appendingPathComponent("fpu.s").path,
+                                          options: ArmasmAssembler.Options(arch: .armv7em))
+    if let error = output.diagnostics.first(where: \.isError) { return "line \(error.line): \(error.message)" }
+    let image = try Linker.link(objects: [(name: "fpu.o", bytes: output.object!)],
+                                layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
+    let memory = MemoryMap()
+    memory.addROM(name: "IROM1", base: 0, size: 0x8_0000)
+    memory.addRAM(name: "IRAM1", base: 0x1000_0000, size: 0x8000)
+    let sim = Simulator(arch: .armv7em, memory: memory)
+    sim.cpu.hasFPU = true
+    try sim.load(image)
+    try sim.reset(vectorTable: 0)
+    let reason = sim.cpu.run(maxInstructions: 10_000)
+    guard case .bkpt(0, _) = reason else { return "stopped with \(reason)" }
+    let r = sim.cpu.r.values
+    let expected: [(Int, UInt32)] = [(4, 0x40C9_0FDB), (5, 0x4080_0000), (6, 6), (7, 23), (8, 0x0008_0006)]
+    for (i, value) in expected where r[i] != value {
+        return String(format: "R%d = 0x%X, expected 0x%X", i, r[i], value)
+    }
+    return nil
+}
+
 /// The LandTiger course template (01_SVC) must link to the same bytes as Keil's own SVC.axf.
 func runKeilTemplateTest(source: String = "templates/01_SVC/Source/template.s", axf: String = "templates/01_SVC/Objects/SVC.axf") throws -> String? {
     let output = ArmasmAssembler.assemble(fileAt: source)
@@ -1495,6 +1582,8 @@ where FileManager.default.fileExists(atPath: axf) {
     }
 }
 report("[M0] encoder vs clang (\(encoderCorpusM0.count) instructions)") { try runEncoderCorpus(encoderCorpusM0, profile: profiles[1]) }
+report("[M4F] native: Keil-syntax FPU + DSP program (VLDR literal, implicit IT on VADDGT)") { try runArmasmFPUTest() }
+report("[M4F] encoder vs clang, DSP + FPU (\(encoderCorpusM4F.count) instructions)") { try runEncoderCorpus(encoderCorpusM4F, profile: profiles[3]) }
 
 print("\n== Differential C tests (simulator vs native Mac)")
 for test in cTests {

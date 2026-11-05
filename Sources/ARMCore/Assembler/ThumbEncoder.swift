@@ -34,6 +34,13 @@ public enum AsmOperand: Equatable, Sendable {
     case regList(UInt16)
     /// Identifier operand: special register, barrier option, CPS flags (upper case).
     case name(String)
+    /// FPU registers S0-S31 / D0-D15.
+    case sReg(Int)
+    case dReg(Int)
+    /// `{S4-S7}` / `{D8-D15}`: consecutive extension registers.
+    case fpList(double: Bool, first: Int, count: Int)
+    /// `#1.5` in a floating-point instruction.
+    case fpImm(Double)
 }
 
 public enum AsmWidth: Sendable { case auto, narrow, wide }
@@ -46,9 +53,12 @@ public struct AsmInstruction: Equatable, Sendable {
     public var setFlags: Bool
     public var width: AsmWidth
     public var operands: [AsmOperand]
+    /// Data types of a floating-point instruction (VCVT.S32.F32 -> ["S32", "F32"]).
+    public var dataTypes: [String] = []
 
     public init(mnemonic: String, condition: Int = 14, setFlags: Bool = false, width: AsmWidth = .auto,
-                operands: [AsmOperand]) {
+                operands: [AsmOperand], dataTypes: [String] = []) {
+        self.dataTypes = dataTypes
         self.mnemonic = mnemonic
         self.condition = condition
         self.setFlags = setFlags
@@ -58,7 +68,7 @@ public struct AsmInstruction: Equatable, Sendable {
 
     public static func == (a: AsmInstruction, b: AsmInstruction) -> Bool {
         a.mnemonic == b.mnemonic && a.condition == b.condition && a.setFlags == b.setFlags
-            && a.width == b.width && a.operands == b.operands
+            && a.width == b.width && a.operands == b.operands && a.dataTypes == b.dataTypes
     }
 }
 
@@ -115,7 +125,7 @@ public enum ThumbEncoder {
             "B", "BL", "BX", "BLX", "CBZ", "CBNZ", "TBB", "TBH",
             "NOP", "YIELD", "WFE", "WFI", "SEV", "BKPT", "SVC", "SWI", "UDF", "CPSIE", "CPSID",
             "DMB", "DSB", "ISB", "MRS", "MSR",
-        ]
+        ] + dspMnemonics + fpMnemonics
         return list.sorted { $0.count > $1.count }
     }()
 
@@ -124,13 +134,19 @@ public enum ThumbEncoder {
         public var setFlags: Bool
         public var condition: Int
         public var width: AsmWidth
+        /// Floating-point data types after the mnemonic (".F32", ".S32.F32").
+        public var dataTypes: [String] = []
     }
 
     /// Splits "ADDSEQ.W" into base ADD, S, EQ, wide. IT instructions are not handled here.
     public static func parseMnemonic(_ raw: String) -> Mnemonic? {
         var text = raw.uppercased()
         var width = AsmWidth.auto
-        if text.hasSuffix(".W") { width = .wide; text.removeLast(2) }
+        var dataTypes: [String] = []
+        if text.hasPrefix("V"), let dot = text.firstIndex(of: ".") {
+            dataTypes = text[text.index(after: dot)...].split(separator: ".").map(String.init)
+            text = String(text[..<dot])
+        } else if text.hasSuffix(".W") { width = .wide; text.removeLast(2) }
         else if text.hasSuffix(".N") { width = .narrow; text.removeLast(2) }
         for base in baseMnemonics where text.hasPrefix(base) {
             var rest = String(text.dropFirst(base.count))
@@ -150,7 +166,7 @@ public enum ThumbEncoder {
                 s = true
                 rest = ""
             }
-            if rest.isEmpty { return Mnemonic(base: base, setFlags: s, condition: cond, width: width) }
+            if rest.isEmpty { return Mnemonic(base: base, setFlags: s, condition: cond, width: width, dataTypes: dataTypes) }
         }
         return nil
     }
@@ -388,6 +404,8 @@ private struct Encoder {
         case "MRS": return try mrs()
         case "MSR": return try msr()
         default:
+            if ThumbEncoder.fpMnemonics.contains(ins.mnemonic) { return try fp() }
+            if ThumbEncoder.dspMnemonics.contains(ins.mnemonic) { return try dsp() }
             throw AsmError("unknown instruction \(ins.mnemonic)")
         }
     }
@@ -1091,5 +1109,389 @@ private struct Encoder {
         let (sysm, mask) = try specialRegister(0)
         let rn = try reg(1)
         return ThumbEncoder.t32(0xF380 | UInt32(rn), 0x8000 | mask << 10 | sysm)
+    }
+}
+
+// MARK: - DSP extension (ARMv7E-M)
+
+extension ThumbEncoder {
+    /// SADD16, QSUB8, UHASX, ... : prefix code (h2 bits 6:4) and operation (h1 bits 6:4).
+    static let parallelPrefixes: [(String, UInt32)] = [("UQ", 5), ("UH", 6), ("SH", 2), ("S", 0), ("Q", 1), ("U", 4)]
+    static let parallelOps: [(String, UInt32)] = [("ADD16", 1), ("ADD8", 0), ("ASX", 2), ("SAX", 6), ("SUB16", 5), ("SUB8", 4)]
+
+    static let dspMnemonics: [String] = {
+        var list = parallelPrefixes.flatMap { p in parallelOps.map { p.0 + $0.0 } }
+        list += ["QADD", "QSUB", "QDADD", "QDSUB", "SEL", "SSAT16", "USAT16", "USAD8", "USADA8", "UMAAL",
+                 "SMLAD", "SMLADX", "SMLSD", "SMLSDX", "SMUAD", "SMUADX", "SMUSD", "SMUSDX",
+                 "SMLAWB", "SMLAWT", "SMULWB", "SMULWT", "SMMLA", "SMMLAR", "SMMLS", "SMMLSR", "SMMUL", "SMMULR",
+                 "SMLALD", "SMLALDX", "SMLSLD", "SMLSLDX", "PKHBT", "PKHTB",
+                 "SXTAB", "SXTAH", "UXTAB", "UXTAH", "SXTB16", "UXTB16", "SXTAB16", "UXTAB16"]
+        for x in ["B", "T"] { for y in ["B", "T"] { list += ["SMLA" + x + y, "SMUL" + x + y, "SMLAL" + x + y] } }
+        return list
+    }()
+
+    static let fpMnemonics: [String] = [
+        "VADD", "VSUB", "VMUL", "VNMUL", "VDIV", "VMLA", "VMLS", "VNMLA", "VNMLS", "VFMA", "VFMS", "VFNMA", "VFNMS",
+        "VABS", "VNEG", "VSQRT", "VMOV", "VMRS", "VMSR", "VCMP", "VCMPE", "VCVT", "VCVTR", "VCVTB", "VCVTT",
+        "VLDR", "VSTR", "VLDM", "VLDMIA", "VLDMDB", "VSTM", "VSTMIA", "VSTMDB", "VPUSH", "VPOP",
+    ]
+}
+
+extension Encoder {
+    func requireDSP() throws {
+        guard ctx.arch == .armv7em else { throw fail("DSP instruction needs a Cortex-M4/M7 (ARMv7E-M) target") }
+    }
+
+    func dsp() throws -> AsmEncoded {
+        try requireDSP()
+        let name = ins.mnemonic
+        let r = { (i: Int) throws -> UInt32 in UInt32(try self.reg(i)) }
+        // Parallel add/subtract.
+        for (prefix, code) in ThumbEncoder.parallelPrefixes where name.hasPrefix(prefix) {
+            if let op = ThumbEncoder.parallelOps.first(where: { prefix + $0.0 == name }) {
+                try expectCount(2...3)
+                let rd = try r(0), rn = ops.count == 3 ? try r(1) : rd, rm = try r(ops.count - 1)
+                return ThumbEncoder.t32(0xFA80 | op.1 << 4 | rn, 0xF000 | rd << 8 | code << 4 | rm)
+            }
+        }
+        switch name {
+        case "QADD", "QSUB", "QDADD", "QDSUB": // Rd, Rm, Rn
+            try expectCount(2...3)
+            let rd = try r(0), rm = ops.count == 3 ? try r(1) : rd, rn = try r(ops.count - 1)
+            let op: UInt32 = ["QADD": 0x80, "QDADD": 0x90, "QSUB": 0xA0, "QDSUB": 0xB0][name]!
+            return ThumbEncoder.t32(0xFA80 | rn, 0xF000 | rd << 8 | op | rm)
+        case "SEL":
+            try expectCount(2...3)
+            let rd = try r(0), rn = ops.count == 3 ? try r(1) : rd, rm = try r(ops.count - 1)
+            return ThumbEncoder.t32(0xFAA0 | rn, 0xF080 | rd << 8 | rm)
+        case "SSAT16", "USAT16":
+            try expectCount(3...3)
+            let rd = try r(0), sat = try imm(1), rn = try r(2)
+            if name == "SSAT16" {
+                guard (1...16).contains(sat) else { throw fail("saturation bit position must be 1-16") }
+                return ThumbEncoder.t32(0xF320 | rn, rd << 8 | UInt32(sat - 1))
+            }
+            guard (0...15).contains(sat) else { throw fail("saturation bit position must be 0-15") }
+            return ThumbEncoder.t32(0xF3A0 | rn, rd << 8 | UInt32(sat))
+        case "PKHBT", "PKHTB":
+            try expectCount(3...4)
+            let rd = try r(0), rn = try r(1), rm = try r(2)
+            var amount: Int = 0
+            if ops.count == 4 {
+                guard case .shift(let type, .imm(let n)) = ops[3],
+                      type == (name == "PKHBT" ? .lsl : .asr) else { throw fail("expected \(name == "PKHBT" ? "LSL" : "ASR") #n") }
+                amount = n
+            }
+            let imm = UInt32(amount & 31)
+            return ThumbEncoder.t32(0xEAC0 | rn, (imm >> 2) << 12 | rd << 8 | (imm & 3) << 6 | (name == "PKHTB" ? 0x20 : 0) | rm)
+        case "SXTAB", "SXTAH", "UXTAB", "UXTAH", "SXTAB16", "UXTAB16", "SXTB16", "UXTB16":
+            let hasRn = !name.hasSuffix("B16") || name.contains("TAB")
+            let rd = try r(0)
+            let rn: UInt32 = hasRn ? try r(1) : 15
+            let rmIndex = hasRn ? 2 : 1
+            let rm = try r(rmIndex)
+            var rotation: UInt32 = 0
+            if ops.count == rmIndex + 2 {
+                guard case .shift(.ror, .imm(let n)) = ops[rmIndex + 1], [0, 8, 16, 24].contains(n) else {
+                    throw fail("rotation must be ROR #8, #16 or #24")
+                }
+                rotation = UInt32(n / 8)
+            }
+            let op1: UInt32 = ["SXTAH": 0, "UXTAH": 1, "SXTAB16": 2, "SXTB16": 2, "UXTAB16": 3, "UXTB16": 3,
+                               "SXTAB": 4, "UXTAB": 5][name]!
+            return ThumbEncoder.t32(0xFA00 | op1 << 4 | rn, 0xF080 | rd << 8 | rotation << 4 | rm)
+        case "SMLALD", "SMLALDX", "SMLSLD", "SMLSLDX", "UMAAL", "SMLALBB", "SMLALBT", "SMLALTB", "SMLALTT":
+            try expectCount(4...4)
+            let lo = try r(0), hi = try r(1), rn = try r(2), rm = try r(3)
+            let (h1, op2): (UInt32, UInt32)
+            switch name {
+            case "UMAAL": (h1, op2) = (0xFBE0, 0x60)
+            case "SMLALD", "SMLALDX": (h1, op2) = (0xFBC0, 0xC0 | (name.hasSuffix("X") ? 0x10 : 0))
+            case "SMLSLD", "SMLSLDX": (h1, op2) = (0xFBD0, 0xC0 | (name.hasSuffix("X") ? 0x10 : 0))
+            default:
+                let n: UInt32 = name.dropFirst(5).first == "T" ? 0x20 : 0, m: UInt32 = name.last == "T" ? 0x10 : 0
+                (h1, op2) = (0xFBC0, 0x80 | n | m)
+            }
+            return ThumbEncoder.t32(h1 | rn, lo << 12 | hi << 8 | op2 | rm)
+        default:
+            // Multiplies: Rd, Rn, Rm [, Ra]; forms without accumulate use Ra = PC.
+            let accumulating = ["SMLA", "SMLS", "SMMLA", "SMMLS", "USADA8"].contains { name.hasPrefix($0) }
+            try expectCount(accumulating ? 4...4 : 3...3)
+            let rd = try r(0), rn = try r(1), rm = try r(2), ra: UInt32 = accumulating ? try r(3) : 15
+            let (op1, bits): (UInt32, UInt32)
+            if name.hasPrefix("SMLAW") || name.hasPrefix("SMULW") {
+                (op1, bits) = (3, name.last == "T" ? 0x10 : 0)
+            } else if ["SMLA", "SMUL"].contains(String(name.prefix(4))), name.count == 6, name.dropFirst(4).allSatisfy({ $0 == "B" || $0 == "T" }) {
+                let n: UInt32 = name.dropFirst(4).first == "T" ? 0x20 : 0, m: UInt32 = name.last == "T" ? 0x10 : 0
+                (op1, bits) = (1, n | m)
+            } else {
+                // X (exchange) / R (round) suffix sets bit 4.
+                var base = name
+                var flag: UInt32 = 0
+                if name.hasSuffix("X") || (name.hasPrefix("SMM") && name.hasSuffix("R")) { flag = 0x10; base.removeLast() }
+                switch base {
+                case "SMLAD", "SMUAD": op1 = 2
+                case "SMLSD", "SMUSD": op1 = 4
+                case "SMMLA", "SMMUL": op1 = 5
+                case "SMMLS": op1 = 6
+                case "USAD8", "USADA8": op1 = 7
+                default: throw fail("unknown DSP instruction")
+                }
+                bits = flag
+            }
+            return ThumbEncoder.t32(0xFB00 | op1 << 4 | rn, ra << 12 | rd << 8 | bits | rm)
+        }
+    }
+
+    // MARK: - Floating point (FPv4-SP)
+
+    func sreg(_ i: Int) throws -> UInt32 {
+        guard i < ops.count, case .sReg(let s) = ops[i] else { throw fail("operand \(i + 1) must be a single-precision register (S0-S31)") }
+        return UInt32(s)
+    }
+
+    func dreg(_ i: Int) throws -> UInt32 {
+        guard i < ops.count, case .dReg(let d) = ops[i] else { throw fail("operand \(i + 1) must be a double-precision register (D0-D15)") }
+        return UInt32(d)
+    }
+
+    func isSReg(_ i: Int) -> Bool { if i < ops.count, case .sReg = ops[i] { return true }; return false }
+    func isDReg(_ i: Int) -> Bool { if i < ops.count, case .dReg = ops[i] { return true }; return false }
+
+    /// Vd/D, Vn/N, Vm/M fields of a single register: (4-bit field, extra bit).
+    func split(_ s: UInt32) -> (UInt32, UInt32) { (s >> 1, s & 1) }
+    func splitD(_ d: UInt32) -> (UInt32, UInt32) { (d & 15, d >> 4) }
+
+    var dataTypes: [String] { ins.dataTypes }
+
+    func requireFPU() throws {
+        guard ctx.arch == .armv7em else { throw fail("floating-point instruction needs a Cortex-M4F/M7 target") }
+        if dataTypes.contains("F64") { throw fail("double precision is not available on the FPv4-SP FPU (Cortex-M4F)") }
+    }
+
+    /// Data processing: h1 = 0xEE00 | opc1 | D | Vn, h2 = Vd | 101 0 | N op M 0 | Vm.
+    func fpThree(_ opc1: UInt32, op: Bool) throws -> AsmEncoded {
+        try expectCount(2...3)
+        let d = try sreg(0), n = ops.count == 3 ? try sreg(1) : d, m = try sreg(ops.count - 1)
+        let (vd, bd) = split(d), (vn, bn) = split(n), (vm, bm) = split(m)
+        return ThumbEncoder.t32(0xEE00 | opc1 | bd << 6 | vn, vd << 12 | 0xA00 | bn << 7 | (op ? 0x40 : 0) | bm << 5 | vm)
+    }
+
+    /// opc1 = 1x11 group: h1 = 0xEEB0 | D | opc2, h2 = Vd | 101 0 | bits 7:6 | M 0 | Vm.
+    func fpOther(d: UInt32, m: UInt32, opc2: UInt32, bits76: UInt32) -> AsmEncoded {
+        let (vd, bd) = split(d), (vm, bm) = split(m)
+        return ThumbEncoder.t32(0xEEB0 | bd << 6 | opc2, vd << 12 | 0xA00 | bits76 << 6 | bm << 5 | vm)
+    }
+
+    /// VFP modified immediate (VFPExpandImm) for a single, nil when not representable.
+    static func fpImmediate(_ value: Double) -> UInt32? {
+        let f = Float(value)
+        guard Double(f) == value, f != 0, f.isFinite else { return nil }
+        let bits = f.bitPattern
+        guard bits & 0x7FFFF == 0 else { return nil }
+        // Exponent field = NOT(b):bbbbb:cd, i.e. 128+cd (exponent 1...4) or 124+cd (exponent -3...0).
+        let exponent = Int((bits >> 23) & 0xFF) - 127
+        let b: UInt32, cd: UInt32
+        switch exponent {
+        case 1...4: (b, cd) = (0, UInt32(exponent - 1))
+        case -3...0: (b, cd) = (1, UInt32(exponent + 3))
+        default: return nil
+        }
+        return (bits >> 31) << 7 | b << 6 | cd << 4 | ((bits >> 19) & 0xF)
+    }
+
+    func fpImmOperand(_ i: Int) throws -> Double {
+        guard i < ops.count else { throw fail("missing immediate") }
+        switch ops[i] {
+        case .fpImm(let d): return d
+        case .imm(.constant(let c)): return Double(c)
+        default: throw fail("operand \(i + 1) must be a floating-point immediate (#1.5)")
+        }
+    }
+
+    func fp() throws -> AsmEncoded {
+        try requireFPU()
+        let name = ins.mnemonic
+        switch name {
+        case "VMLA": return try fpThree(0x00, op: false)
+        case "VMLS": return try fpThree(0x00, op: true)
+        case "VNMLA": return try fpThree(0x10, op: true)
+        case "VNMLS": return try fpThree(0x10, op: false)
+        case "VMUL": return try fpThree(0x20, op: false)
+        case "VNMUL": return try fpThree(0x20, op: true)
+        case "VADD": return try fpThree(0x30, op: false)
+        case "VSUB": return try fpThree(0x30, op: true)
+        case "VDIV": return try fpThree(0x80, op: false)
+        case "VFNMA": return try fpThree(0x90, op: true)
+        case "VFNMS": return try fpThree(0x90, op: false)
+        case "VFMA": return try fpThree(0xA0, op: false)
+        case "VFMS": return try fpThree(0xA0, op: true)
+        case "VABS", "VNEG", "VSQRT":
+            try expectCount(2...2)
+            let (opc2, bits): (UInt32, UInt32) = ["VABS": (0, 3), "VNEG": (1, 1), "VSQRT": (1, 3)][name]!
+            return fpOther(d: try sreg(0), m: try sreg(1), opc2: opc2, bits76: bits)
+        case "VCMP", "VCMPE":
+            try expectCount(2...2)
+            let e: UInt32 = name == "VCMPE" ? 2 : 0
+            if isSReg(1) { return fpOther(d: try sreg(0), m: try sreg(1), opc2: 4, bits76: e | 1) }
+            guard try fpImmOperand(1) == 0 else { throw fail("can only compare with #0.0") }
+            return fpOther(d: try sreg(0), m: 0, opc2: 5, bits76: e | 1)
+        case "VCVTB", "VCVTT":
+            try expectCount(2...2)
+            let t: UInt32 = name == "VCVTT" ? 2 : 0
+            switch dataTypes {
+            case ["F32", "F16"]: return fpOther(d: try sreg(0), m: try sreg(1), opc2: 2, bits76: t | 1)
+            case ["F16", "F32"]: return fpOther(d: try sreg(0), m: try sreg(1), opc2: 3, bits76: t | 1)
+            default: throw fail("expected .F32.F16 or .F16.F32")
+            }
+        case "VCVT", "VCVTR":
+            return try fpConvert(roundTowardZero: name == "VCVT")
+        case "VMOV": return try fpMove()
+        case "VMRS":
+            try expectCount(2...2)
+            guard case .name("FPSCR") = ops[1] else { throw fail("expected FPSCR") }
+            let rt: UInt32
+            if case .name("APSR_NZCV") = ops[0] { rt = 15 } else { rt = UInt32(try reg(0)) }
+            return ThumbEncoder.t32(0xEEF1, rt << 12 | 0x0A10)
+        case "VMSR":
+            try expectCount(2...2)
+            guard case .name("FPSCR") = ops[0] else { throw fail("expected FPSCR") }
+            return ThumbEncoder.t32(0xEEE1, UInt32(try reg(1)) << 12 | 0x0A10)
+        case "VLDR", "VSTR": return try fpLoadStore(load: name == "VLDR")
+        case "VLDM", "VLDMIA", "VLDMDB", "VSTM", "VSTMIA", "VSTMDB", "VPUSH", "VPOP": return try fpMultiple()
+        default: throw fail("unknown floating-point instruction")
+        }
+    }
+
+    func fpConvert(roundTowardZero: Bool) throws -> AsmEncoded {
+        guard dataTypes.count == 2 else { throw fail("expected two data types, e.g. VCVT.S32.F32") }
+        let (to, from) = (dataTypes[0], dataTypes[1])
+        let d = try sreg(0)
+        if ops.count == 3 { // fixed point: Sd, Sd, #fbits
+            guard try sreg(1) == d else { throw fail("fixed-point conversion: source and destination must be the same register") }
+            let toFixed = from == "F32"
+            let fixedType = toFixed ? to : from
+            guard (toFixed ? from : to) == "F32", ["S16", "U16", "S32", "U32"].contains(fixedType) else {
+                throw fail("unsupported conversion")
+            }
+            let size: Int64 = fixedType.hasSuffix("16") ? 16 : 32
+            let fbits = try imm(2)
+            guard (size == 16 ? 0...16 : 1...32).contains(fbits) else { throw fail("fraction bits out of range") }
+            let value = UInt32(size - fbits)
+            let (vd, bd) = split(d)
+            let opc2: UInt32 = 0xA | (toFixed ? 4 : 0) | (fixedType.hasPrefix("U") ? 1 : 0)
+            return ThumbEncoder.t32(0xEEB0 | bd << 6 | opc2,
+                                    vd << 12 | 0xA00 | (size == 32 ? 0x80 : 0) | 0x40 | (value & 1) << 5 | value >> 1)
+        }
+        try expectCount(2...2)
+        let m = try sreg(1)
+        switch (to, from) {
+        case ("F32", "S32"): return fpOther(d: d, m: m, opc2: 8, bits76: 3)
+        case ("F32", "U32"): return fpOther(d: d, m: m, opc2: 8, bits76: 1)
+        case ("S32", "F32"): return fpOther(d: d, m: m, opc2: 0xD, bits76: roundTowardZero ? 3 : 1)
+        case ("U32", "F32"): return fpOther(d: d, m: m, opc2: 0xC, bits76: roundTowardZero ? 3 : 1)
+        default: throw fail("unsupported conversion .\(to).\(from)")
+        }
+    }
+
+    func fpMove() throws -> AsmEncoded {
+        switch ops.count {
+        case 2:
+            if isSReg(0) && isSReg(1) { return fpOther(d: try sreg(0), m: try sreg(1), opc2: 0, bits76: 1) }
+            if isSReg(0) && isReg(1) { // VMOV Sn, Rt
+                let (vn, bn) = split(try sreg(0))
+                return ThumbEncoder.t32(0xEE00 | vn, UInt32(try reg(1)) << 12 | 0xA10 | bn << 7)
+            }
+            if isReg(0) && isSReg(1) { // VMOV Rt, Sn
+                let (vn, bn) = split(try sreg(1))
+                return ThumbEncoder.t32(0xEE10 | vn, UInt32(try reg(0)) << 12 | 0xA10 | bn << 7)
+            }
+            if isSReg(0) {
+                let value = try fpImmOperand(1)
+                guard let imm8 = Self.fpImmediate(value) else {
+                    throw fail("#\(value) cannot be encoded as a VMOV immediate (use VLDR)")
+                }
+                let (vd, bd) = split(try sreg(0))
+                return ThumbEncoder.t32(0xEEB0 | bd << 6 | imm8 >> 4, vd << 12 | 0xA00 | (imm8 & 0xF))
+            }
+        case 3:
+            if isDReg(0) { // VMOV Dm, Rt, Rt2
+                let (vm, bm) = splitD(try dreg(0))
+                return ThumbEncoder.t32(0xEC40 | UInt32(try reg(2)), UInt32(try reg(1)) << 12 | 0xB10 | bm << 5 | vm)
+            }
+            if isDReg(2) { // VMOV Rt, Rt2, Dm
+                let (vm, bm) = splitD(try dreg(2))
+                return ThumbEncoder.t32(0xEC50 | UInt32(try reg(1)), UInt32(try reg(0)) << 12 | 0xB10 | bm << 5 | vm)
+            }
+        case 4:
+            if isSReg(0) { // VMOV Sm, Sm1, Rt, Rt2
+                let s = try sreg(0)
+                guard try sreg(1) == s + 1 else { throw fail("the two S registers must be consecutive") }
+                let (vm, bm) = split(s)
+                return ThumbEncoder.t32(0xEC40 | UInt32(try reg(3)), UInt32(try reg(2)) << 12 | 0xA10 | bm << 5 | vm)
+            }
+            if isReg(0) { // VMOV Rt, Rt2, Sm, Sm1
+                let s = try sreg(2)
+                guard try sreg(3) == s + 1 else { throw fail("the two S registers must be consecutive") }
+                let (vm, bm) = split(s)
+                return ThumbEncoder.t32(0xEC50 | UInt32(try reg(1)), UInt32(try reg(0)) << 12 | 0xA10 | bm << 5 | vm)
+            }
+        default: break
+        }
+        throw fail("unsupported VMOV operands")
+    }
+
+    func fpLoadStore(load: Bool) throws -> AsmEncoded {
+        try expectCount(2...2)
+        let double = isDReg(0)
+        let (vd, bd) = double ? splitD(try dreg(0)) : split(try sreg(0))
+        let h2base = vd << 12 | (double ? 0xB00 : 0xA00)
+        let (rn, offset): (UInt32, Int64)
+        switch ops[1] {
+        case .mem(let base, .imm(let off), .offset):
+            (rn, offset) = (UInt32(base), off)
+        case .target(let value), .imm(let value):
+            // PC-relative literal in the same section.
+            guard case .symbol(let name, let addend) = value, let target = ctx.local(name) else {
+                throw fail("literal must be a label in the same area")
+            }
+            let pc = (ctx.address + 4) & ~3
+            (rn, offset) = (15, target + addend - pc)
+        default:
+            throw fail("expected [Rn, #offset] or a label")
+        }
+        guard offset % 4 == 0, (-1020...1020).contains(offset) else { throw fail("offset must be a multiple of 4 in -1020..1020") }
+        let u: UInt32 = offset >= 0 ? 0x80 : 0
+        return ThumbEncoder.t32(0xED00 | u | bd << 6 | (load ? 0x10 : 0) | rn, h2base | UInt32(abs(offset) / 4))
+    }
+
+    func fpMultiple() throws -> AsmEncoded {
+        let name = ins.mnemonic
+        let push = name == "VPUSH", pop = name == "VPOP"
+        let rn: UInt32
+        var writeback = true
+        var listIndex = 1
+        if push || pop {
+            try expectCount(1...1)
+            rn = 13
+            listIndex = 0
+        } else {
+            try expectCount(2...2)
+            switch ops[0] {
+            case .reg(let r): rn = UInt32(r); writeback = false
+            case .regWriteback(let r): rn = UInt32(r)
+            default: throw fail("expected a base register")
+            }
+        }
+        guard case .fpList(let double, let first, let count) = ops[listIndex] else { throw fail("expected a register list {S0-S3}") }
+        let load = pop || name.hasPrefix("VLDM")
+        let decrement = push || name.hasSuffix("DB")
+        if decrement && !writeback { throw fail("the DB form needs write-back (Rn!)") }
+        let words = UInt32(count * (double ? 2 : 1))
+        guard words > 0, words <= 32 else { throw fail("bad register list") }
+        let (vd, bd) = double ? splitD(UInt32(first)) : split(UInt32(first))
+        let pu: UInt32 = decrement ? 0x100 : 0x80
+        return ThumbEncoder.t32(0xEC00 | pu | bd << 6 | (writeback ? 0x20 : 0) | (load ? 0x10 : 0) | rn,
+                                vd << 12 | (double ? 0xB00 : 0xA00) | words)
     }
 }

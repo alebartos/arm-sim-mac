@@ -1057,6 +1057,7 @@ private final class Assembly: ExprEnvironment {
             let item = raw.trimmingCharacters(in: .whitespaces)
             guard !item.isEmpty else { throw AsmError("missing operand") }
             let upper = item.uppercased()
+            if mnemonic.hasPrefix("V"), let fp = try parseFPOperand(item) { result.append(fp); continue }
             if let r = parseRegister(item) { result.append(.reg(r)); continue }
             if item.hasSuffix("!"), let r = parseRegister(String(item.dropLast())) { result.append(.regWriteback(r)); continue }
             if item.hasPrefix("#") { result.append(.imm(try evaluateValue(String(item.dropFirst())))); continue }
@@ -1071,6 +1072,7 @@ private final class Assembly: ExprEnvironment {
             case "MRS": nameOperand = index == 1
             case "MSR": nameOperand = index == 0
             case "CPSIE", "CPSID", "DMB", "DSB", "ISB": nameOperand = true
+            case "VMRS", "VMSR": nameOperand = ["FPSCR", "APSR_NZCV"].contains(upper)
             default: nameOperand = false
             }
             if nameOperand && !isDefined(item) && item.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
@@ -1080,6 +1082,44 @@ private final class Assembly: ExprEnvironment {
             result.append(.target(try evaluateValue(item)))
         }
         return result
+    }
+
+    /// S0-S31, D0-D15, {S0-S3} / {D8-D15}, #1.5 in floating-point instructions (nil: not one of these).
+    func parseFPOperand(_ item: String) throws -> AsmOperand? {
+        func fpRegister(_ text: String) -> (double: Bool, index: Int)? {
+            let t = text.trimmingCharacters(in: .whitespaces).uppercased()
+            guard let kind = t.first, kind == "S" || kind == "D", let n = Int(t.dropFirst()) else { return nil }
+            guard (0...(kind == "S" ? 31 : 15)).contains(n) else { return nil }
+            return (kind == "D", n)
+        }
+        if let r = fpRegister(item) { return r.double ? .dReg(r.index) : .sReg(r.index) }
+        if item.hasPrefix("{") {
+            guard item.hasSuffix("}") else { throw AsmError("missing } in register list") }
+            var registers: [(double: Bool, index: Int)] = []
+            for part in Self.splitList(String(item.dropFirst().dropLast())) where !part.isEmpty {
+                let bounds = part.split(separator: "-").map(String.init)
+                guard let first = fpRegister(bounds[0]) else { return nil }
+                var last = first
+                if bounds.count == 2 {
+                    guard let l = fpRegister(bounds[1]), l.double == first.double, l.index >= first.index else {
+                        throw AsmError("bad register range '\(part)'")
+                    }
+                    last = l
+                }
+                for i in first.index...last.index { registers.append((first.double, i)) }
+            }
+            guard let first = registers.first, registers.allSatisfy({ $0.double == first.double }),
+                  registers.enumerated().allSatisfy({ $0.element.index == first.index + $0.offset }) else {
+                throw AsmError("floating-point register list must be consecutive registers of one size")
+            }
+            return .fpList(double: first.double, first: first.index, count: registers.count)
+        }
+        if item.hasPrefix("#") {
+            let text = item.dropFirst().trimmingCharacters(in: .whitespaces)
+            let lower = text.lowercased()
+            if !lower.hasPrefix("0x"), lower.contains(".") || lower.contains("e"), let d = Double(text) { return .fpImm(d) }
+        }
+        return nil
     }
 
     func parseShift(_ item: String) throws -> AsmOperand? {
@@ -1185,7 +1225,7 @@ private final class Assembly: ExprEnvironment {
             }
             let m = ThumbEncoder.parseMnemonic(mnemonicText)!
             let instruction = AsmInstruction(mnemonic: m.base, condition: m.condition, setFlags: m.setFlags,
-                                             width: m.width, operands: operands)
+                                             width: m.width, operands: operands, dataTypes: m.dataTypes)
             var prefix: [UInt8] = []
             var address = Int64(s.offset)
             if let (pattern, cond) = s.implicitIT {
