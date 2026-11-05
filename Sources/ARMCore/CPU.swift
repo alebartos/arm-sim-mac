@@ -78,8 +78,8 @@ public final class CPU {
     // MARK: Architectural state
 
     /// R0-R15. R13 is the active stack pointer, R15 the address of the next instruction.
-    public var r = [UInt32](repeating: 0, count: 16)
-    private var savedRegs = [UInt32](repeating: 0, count: 16)
+    public let r = RegisterFile()
+    private let savedRegs = RegisterFile()
     public var n = false, z = false, c = false, v = false, q = false
     /// APSR.GE[3:0] (DSP extension).
     public var ge: UInt32 = 0
@@ -135,6 +135,11 @@ public final class CPU {
     var curPC: UInt32 = 0
     var nextPC: UInt32 = 0
     var event: StepEvent = .none
+
+    deinit {
+        r.base.deallocate()
+        savedRegs.base.deallocate()
+    }
 
     public init(arch: Architecture = .armv7m, memory: MemoryMap) {
         self.arch = arch
@@ -205,7 +210,7 @@ public final class CPU {
 
     /// Clear registers without touching memory (for running at an arbitrary entry point).
     public func resetState() {
-        r = [UInt32](repeating: 0, count: 16)
+        r.reset()
         r[14] = 0xFFFF_FFFF
         n = false; z = false; c = false; v = false; q = false
         ge = 0; itState = 0; ipsr = 0
@@ -602,4 +607,26 @@ public final class CPU {
         }
         return String(decoding: bytes, as: UTF8.self)
     }
+}
+
+
+/// R0-R15 in a fixed buffer: subscripting it costs a load or store (an Array would check
+/// uniqueness and copy-on-write on every register write of the interpreter).
+public struct RegisterFile {
+    let base: UnsafeMutablePointer<UInt32>
+
+    init() {
+        base = .allocate(capacity: 16)
+        base.initialize(repeating: 0, count: 16)
+    }
+
+    public subscript(index: Int) -> UInt32 {
+        @inline(__always) get { base[index] }
+        @inline(__always) nonmutating set { base[index] = newValue }
+    }
+
+    /// A copy of the 16 registers.
+    public var values: [UInt32] { Array(UnsafeBufferPointer(start: base, count: 16)) }
+
+    func reset() { base.update(repeating: 0, count: 16) }
 }

@@ -743,7 +743,7 @@ func runArmasmTest(native: Bool) throws -> String? {
     guard (try? memory.read(0x2FC, size: 4)) == 0xFFFF_FFFF else { return "CRP key not at 0x2FC" }
     let reason = sim.cpu.run(maxInstructions: 10_000)
     guard case .bkpt(0, _) = reason else { return "stopped with \\(reason)" }
-    let r = sim.cpu.r
+    let r = sim.cpu.r.values
     let expected: [(Int, UInt32)] = [(4, 100), (5, 0x2A), (6, UInt32(UInt8(ascii: "e"))), (7, 0xFF), (8, 1)]
     for (i, value) in expected where r[i] != value {
         return String(format: "R%d = 0x%X, expected 0x%X", i, r[i], value)
@@ -843,7 +843,7 @@ func runLPCTest(native: Bool) throws -> String? {
     try sim.reset(vectorTable: 0)
     let reason = sim.cpu.run(maxInstructions: 100_000)
     guard case .bkpt(0, _) = reason else { return "stopped with \(reason)" }
-    let r = sim.cpu.r
+    let r = sim.cpu.r.values
     if r[4] != 10 { return "TIMER0 interrupts: \(r[4]), expected 10" }
     if r[6] != 0x55 { return String(format: "FIO2PIN = 0x%02X, expected 0x55", r[6]) }
     if lpc.gpio.pins(2) & 0xFF != 0x55 { return "LED pins not driven" }
@@ -1150,7 +1150,7 @@ func runArmasmFeatureTest() throws -> String? {
     try sim.reset(vectorTable: 0)
     let reason = sim.cpu.run(maxInstructions: 10_000)
     guard case .bkpt(0, _) = reason else { return "stopped with \(reason)" }
-    let r = sim.cpu.r
+    let r = sim.cpu.r.values
     let expected: [(Int, UInt32)] = [(0, 11), (1, 13), (2, 0), (3, 0x1234_5678), (4, 0x1234_5678), (5, 1), (6, 2),
                                      (7, 0x42), (8, 0xCAFE_F00D), (9, 0x77)]
     for (i, value) in expected where r[i] != value {

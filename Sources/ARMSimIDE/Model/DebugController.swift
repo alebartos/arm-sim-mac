@@ -170,7 +170,7 @@ final class DebugController: ObservableObject {
     /// Feed the Logic Analyzer (simulation queue).
     private func sampleAnalyzer(_ sim: Simulator) {
         guard sampling else { return }
-        LogicAnalyzer.shared.sample(cycle: sim.cpu.cycles, read: { sim.memory.peekRegister($0, size: $1) }, registers: sim.cpu.r)
+        LogicAnalyzer.shared.sample(cycle: sim.cpu.cycles, read: { sim.memory.peekRegister($0, size: $1) }, registers: sim.cpu.r.values)
     }
     private let outputLock = NSLock()
 
@@ -456,7 +456,7 @@ final class DebugController: ObservableObject {
     private func takeSnapshot(_ sim: Simulator) -> CPUSnapshot {
         let cpu = sim.cpu
         var s = CPUSnapshot()
-        s.r = cpu.r
+        s.r = cpu.r.values
         s.xpsr = cpu.xpsr
         s.msp = cpu.msp
         s.psp = cpu.psp

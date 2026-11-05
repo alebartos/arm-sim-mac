@@ -11,7 +11,10 @@ let package = Package(
     ],
     targets: [
         // Simulation engine: CPU core, memory bus, ELF loader / mini linker.
-        .target(name: "ARMCore"),
+        // Hot interpreter loop: no dynamic exclusivity checks in release builds.
+        .target(name: "ARMCore", swiftSettings: [
+            .unsafeFlags(["-enforce-exclusivity=unchecked"], .when(configuration: .release)),
+        ]),
         // Command line front end: load an ELF/.o/.bin and run it.
         .executableTarget(name: "armsim", dependencies: ["ARMCore"]),
         // µVision-like IDE (SwiftUI): project manager, editor, build, simulator debugger.
