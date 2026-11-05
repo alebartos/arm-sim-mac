@@ -60,6 +60,23 @@ struct GPIOWindow: View {
     }
 }
 
+/// RGB565 frame of the LandTiger LCD as an image.
+enum LCDImage {
+    static func make(_ pixels: [UInt16], width: Int = LandTigerLCD.width, height: Int = LandTigerLCD.height) -> CGImage? {
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        for (i, p) in pixels.prefix(width * height).enumerated() {
+            let r = UInt32(p >> 11) & 0x1F, g = UInt32(p >> 5) & 0x3F, b = UInt32(p) & 0x1F
+            rgba[i * 4] = UInt8((r * 255 + 15) / 31)
+            rgba[i * 4 + 1] = UInt8((g * 255 + 31) / 63)
+            rgba[i * 4 + 2] = UInt8((b * 255 + 15) / 31)
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+}
+
 /// LandTiger board panel: LEDs on P2.0-P2.7 and the INT0 / KEY1 / KEY2 buttons (EINT0-2).
 struct LandTigerWindow: View {
     @ObservedObject var debugger = Workspace.shared.debugger
@@ -67,6 +84,7 @@ struct LandTigerWindow: View {
     var body: some View {
         let pins = debugger.snapshot.gpioPins.count == 5 ? debugger.snapshot.gpioPins[2] : 0
         let dir = debugger.snapshot.gpioDirection.count == 5 ? debugger.snapshot.gpioDirection[2] : 0
+        HStack(alignment: .top, spacing: 18) {
         VStack(spacing: 14) {
             Text("LandTiger LPC1768").font(.system(size: 13, weight: .semibold))
             HStack(spacing: 10) {
@@ -129,8 +147,25 @@ struct LandTigerWindow: View {
                 Text("Start a debug session with an LPC17xx device.").foregroundColor(.secondary)
             }
         }
+        VStack(spacing: 4) {
+            Group {
+                if let frame = debugger.lcdFrame, let image = LCDImage.make(frame) {
+                    Image(decorative: image, scale: 1).interpolation(.none).resizable()
+                } else {
+                    Rectangle().fill(Color.black)
+                }
+            }
+            .frame(width: 240, height: 320)
+            .overlay(Rectangle().stroke(Color(white: 0.3), lineWidth: 2))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in debugger.setTouch((x: Int(g.location.x), y: Int(g.location.y))) }
+                .onEnded { _ in debugger.setTouch(nil) })
+            Text("TFT 240 × 320 (ILI9325) · click to touch (ADS7843 on SSP1)").font(.system(size: 8)).foregroundColor(.secondary)
+        }
+        }
         .padding(16)
-        .frame(minWidth: 520, minHeight: 330)
+        .frame(minWidth: 800, minHeight: 360)
     }
 
     private func joystick(_ symbol: String, _ direction: LPC17xx.Joystick) -> some View {

@@ -32,14 +32,14 @@ public class WordDevice: MMIODevice {
     func merge(_ old: UInt32, _ value: UInt32, _ mask: UInt32) -> UInt32 { (old & ~mask) | (value & mask) }
 }
 
-public enum LPCPeripheralClock {
+public enum LPCPeripheralClock: Int, CaseIterable {
     case timer0, timer1, timer2, timer3, rit, adc, dac
 }
 
 // MARK: - System control (0x400FC000)
 
 public final class LPCSystemControl: WordDevice {
-    weak var system: SystemControl?
+    var system: SystemControl?
     private var registers: [UInt32: UInt32] = [0x000: 0x303A, 0x0C4: 0x0428_87DE]
     public private(set) var pll0Control: UInt32 = 0
     public private(set) var pll0Config: UInt32 = 0
@@ -79,12 +79,19 @@ public final class LPCSystemControl: WordDevice {
         case 0x140: // EXTINT: write 1 to clear
             externalInterrupts &= ~(value & mask & 0xF)
             externalInterrupts |= heldEINT & ~(registers[0x148] ?? 0) & 0xF // level mode: still asserted
-        default: registers[offset] = merge(registers[offset] ?? 0, value, mask)
+        default:
+            registers[offset] = merge(registers[offset] ?? 0, value, mask)
+            if offset == 0x1A8 || offset == 0x1AC { dividers = LPCPeripheralClock.allCases.map(computeDivider) }
         }
     }
 
     /// Peripheral clock divider from PCLKSEL0/1 (00 = CCLK/4, 01 = /1, 10 = /2, 11 = /8).
-    public func divider(_ clock: LPCPeripheralClock) -> UInt64 {
+    /// Cached: peripherals ask for it on every tick.
+    public func divider(_ clock: LPCPeripheralClock) -> UInt64 { dividers[clock.rawValue] }
+
+    private lazy var dividers: [UInt64] = LPCPeripheralClock.allCases.map(computeDivider)
+
+    private func computeDivider(_ clock: LPCPeripheralClock) -> UInt64 {
         let field: UInt32
         switch clock {
         case .timer0: field = ((registers[0x1A8] ?? 0) >> 2) & 3
@@ -113,6 +120,8 @@ public final class LPCGPIO: WordDevice {
     public private(set) var output = [UInt32](repeating: 0, count: 5)
     /// Level applied to input pins from outside (pull-ups: high by default).
     public var input = [UInt32](repeating: 0xFFFF_FFFF, count: 5)
+    /// Called after every register write (board devices wired to the pins, e.g. the LCD).
+    var onWrite: (() -> Void)?
 
     public func pins(_ port: Int) -> UInt32 {
         (output[port] & direction[port]) | (input[port] & ~direction[port])
@@ -142,6 +151,7 @@ public final class LPCGPIO: WordDevice {
         case 0x1C: output[port] &= ~(value & writable)
         default: break
         }
+        onWrite?()
     }
 }
 
@@ -151,8 +161,8 @@ public final class LPCTimer: WordDevice, ClockedDevice {
     public let index: Int
     let irq: Int
     let clock: LPCPeripheralClock
-    weak var control: LPCSystemControl?
-    weak var system: SystemControl?
+    var control: LPCSystemControl?  // strong: no cycle, read on every tick
+    var system: SystemControl?
 
     public private(set) var interruptFlags: UInt32 = 0  // IR
     public private(set) var timerControl: UInt32 = 0    // TCR
@@ -274,8 +284,8 @@ public final class LPCTimer: WordDevice, ClockedDevice {
 // MARK: - Repetitive Interrupt Timer (0x400B0000)
 
 public final class LPCRIT: WordDevice, ClockedDevice {
-    weak var control: LPCSystemControl?
-    weak var system: SystemControl?
+    var control: LPCSystemControl?  // strong: no cycle, read on every tick
+    var system: SystemControl?
     public private(set) var compare: UInt32 = 0xFFFF_FFFF // RICOMPVAL
     public private(set) var compareMask: UInt32 = 0       // RIMASK
     public private(set) var controlRegister: UInt32 = 0xC // RICTRL
@@ -373,7 +383,7 @@ public final class LPCRIT: WordDevice, ClockedDevice {
 public final class LPCUART: WordDevice {
     public let index: Int
     let irq: Int
-    weak var system: SystemControl?
+    var system: SystemControl?
     /// Called with every transmitted byte.
     public var onTransmit: ((UInt8) -> Void)?
     private var receiveQueue: [UInt8] = []
@@ -441,8 +451,8 @@ public final class LPCUART: WordDevice {
 /// (PCLK_ADC / (CLKDIV + 1)); software start (START = 001) or BURST mode.
 /// LandTiger: the potentiometer is on AD0.5 (P1.31).
 public final class LPCADC: WordDevice, ClockedDevice {
-    weak var control: LPCSystemControl?
-    weak var system: SystemControl?
+    var control: LPCSystemControl?  // strong: no cycle, read on every tick
+    var system: SystemControl?
     static let irq = 22
     /// Analog input of each channel as a 12-bit value (0 = 0 V, 0xFFF = VREFP).
     public var inputs = [UInt16](repeating: 0x800, count: 8)
@@ -588,6 +598,10 @@ public final class LPC17xx {
     public let rit = LPCRIT()
     public let adc = LPCADC()
     public let dac = LPCDAC()
+    public let lcd = LandTigerLCD()
+    public let ssp1 = LPCSSP()
+    public let touch = LandTigerTouch()
+    private var touchSelected = false
     public let pinConnect = GenericPeripheralDevice()
     public let uarts = [LPCUART(index: 0, irq: 5), LPCUART(index: 1, irq: 6), LPCUART(index: 2, irq: 7), LPCUART(index: 3, irq: 8)]
 
@@ -604,7 +618,7 @@ public final class LPC17xx {
             timer.system = system
             timer.control = lpc.systemControl
         }
-        memory.addMMIO(name: "SC", base: 0x400F_C000, size: 0x4000, device: lpc.systemControl)
+        memory.addMMIO(name: "SC", base: 0x400F_C000, size: 0x4000, device: lpc.systemControl, clockSensitive: true)
         memory.addMMIO(name: "GPIO", base: 0x2009_C000, size: 0x4000, device: lpc.gpio)
         memory.addMMIO(name: "TIMER0", base: 0x4000_4000, size: 0x4000, device: lpc.timers[0])
         memory.addMMIO(name: "TIMER1", base: 0x4000_8000, size: 0x4000, device: lpc.timers[1])
@@ -612,6 +626,16 @@ public final class LPC17xx {
         memory.addMMIO(name: "TIMER3", base: 0x4009_4000, size: 0x4000, device: lpc.timers[3])
         memory.addMMIO(name: "RIT", base: 0x400B_0000, size: 0x4000, device: lpc.rit)
         memory.addMMIO(name: "PINCON", base: 0x4002_C000, size: 0x4000, device: lpc.pinConnect)
+        lpc.gpio.onWrite = { [unowned lpc] in
+            lpc.lcd.gpioChanged(lpc.gpio)
+            let selected = lpc.gpio.pins(0) & (1 << 6) == 0
+            if selected != lpc.touchSelected { lpc.touchSelected = selected; lpc.touch.chipSelectChanged(active: selected) }
+        }
+        lpc.ssp1.exchange = { [unowned lpc] byte in lpc.touchSelected ? lpc.touch.exchange(byte) : 0xFF }
+        lpc.touch.applyPenIRQ = { [unowned lpc] in
+            if lpc.touch.point != nil { lpc.gpio.input[2] &= ~(1 << 13) } else { lpc.gpio.input[2] |= 1 << 13 }
+        }
+        memory.addMMIO(name: "SSP1", base: 0x4003_0000, size: 0x4000, device: lpc.ssp1)
         lpc.adc.system = system
         lpc.adc.control = lpc.systemControl
         lpc.dac.cpu = sim.cpu

@@ -67,7 +67,7 @@ final class DebugController: ObservableObject {
     /// Characters typed into a UART window go to the simulated receiver.
     func sendUART(_ index: Int, _ text: String) {
         guard let lpc, index < lpc.uarts.count else { return }
-        queue.async { lpc.uarts[index].receive(Array(text.utf8)) }
+        inject { lpc.uarts[index].receive(Array(text.utf8)) }
     }
 
     /// The simulator when it is safe to inspect from the UI thread (stopped).
@@ -80,39 +80,67 @@ final class DebugController: ObservableObject {
 
     /// LandTiger buttons: 0 = INT0 (EINT0), 1 = KEY1 (EINT1), 2 = KEY2 (EINT2).
     @Published var joystickHeld = Set<Int>()
+    /// LandTiger LCD contents (RGB565), copied when the program changed them.
+    @Published private(set) var lcdFrame: [UInt16]?
+    private var lcdFrameCount: UInt64 = .max
 
     func setJoystick(_ direction: LPC17xx.Joystick, pressed: Bool) {
         if pressed { joystickHeld.insert(direction.rawValue) } else { joystickHeld.remove(direction.rawValue) }
         guard let lpc else { return }
-        queue.async { [weak self] in
-            lpc.setJoystick(direction, pressed: pressed)
-            if self?.isRunning == false { self?.publish(stopMessage: nil) }
-        }
+        inject { lpc.setJoystick(direction, pressed: pressed) }
+    }
+
+    /// Touch on the LandTiger LCD at a pixel, or release (nil).
+    func setTouch(_ point: (x: Int, y: Int)?) {
+        guard let lpc else { return }
+        let clamped = point.map { (x: min(max($0.x, 0), LandTigerLCD.width - 1), y: min(max($0.y, 0), LandTigerLCD.height - 1)) }
+        inject { lpc.touch.point = clamped }
     }
 
     func setPotentiometer(_ value: Double) {
         potentiometer = min(max(value, 0), 1)
         guard let lpc else { return }
         let raw = UInt16((potentiometer * 4095).rounded())
-        queue.async { lpc.adc.inputs[5] = raw }
+        inject { lpc.adc.inputs[5] = raw }
     }
 
     func setButton(_ index: Int, pressed: Bool) {
         if pressed { buttonsHeld.insert(index) } else { buttonsHeld.remove(index) }
         guard let lpc else { return }
-        queue.async { [weak self] in
-            lpc.setButton(index, pressed: pressed)
-            if self?.isRunning == false { self?.publish(stopMessage: nil) }
-        }
+        inject { lpc.setButton(index, pressed: pressed) }
     }
 
     /// Toggle an input pin level (GPIO dialog).
     func toggleInputPin(port: Int, bit: Int) {
         guard let lpc else { return }
+        inject { lpc.gpio.input[port] ^= 1 << UInt32(bit) }
+    }
+
+    /// Board inputs (buttons, joystick, touch, potentiometer, UART, pins) for the simulation thread.
+    /// While the program runs the simulation queue is busy, so the run loop applies them between
+    /// instruction chunks; when stopped, a queued job applies them and refreshes the views.
+    private var injected: [() -> Void] = []
+    private let injectLock = NSLock()
+
+    private func inject(_ action: @escaping () -> Void) {
+        injectLock.lock()
+        injected.append(action)
+        injectLock.unlock()
         queue.async { [weak self] in
-            lpc.gpio.input[port] ^= 1 << UInt32(bit)
-            self?.publish(stopMessage: nil, stillRunning: self?.isRunning ?? false)
+            guard let self, self.applyInjected() else { return }
+            self.publish(stopMessage: nil, stillRunning: self.isRunning)
         }
+    }
+
+    /// Runs on the simulation queue. Returns true when something was applied.
+    @discardableResult
+    private func applyInjected() -> Bool {
+        injectLock.lock()
+        let actions = injected
+        injected = []
+        injectLock.unlock()
+        actions.forEach { $0() }
+        return !actions.isEmpty
     }
     /// Breakpoints by address (resolved from source lines + set in disassembly/command window).
     private(set) var breakpointAddresses = Set<UInt32>()
@@ -196,6 +224,8 @@ final class DebugController: ObservableObject {
         // Behavioural peripheral models where available (LandTiger / LPC17xx)...
         lpc = product.device.name.uppercased().hasPrefix("LPC17") ? LPC17xx.install(on: sim) : nil
         lpc?.adc.inputs[5] = UInt16((potentiometer * 4095).rounded())
+        lcdFrame = nil
+        lcdFrameCount = .max
         // ...and generic registers (hold written values) for the rest of the peripheral space.
         let generic = GenericPeripheralDevice()
         memory.addMMIOFillingGaps(name: "Peripherals", base: 0x4000_0000, size: 0x2000_0000, device: generic)
@@ -374,6 +404,7 @@ final class DebugController: ObservableObject {
         var first = ignoreFirstBreakpoint
         while executed < limit {
             if stopRequested { return nil }
+            applyInjected()
             let chunk: UInt64 = condition == nil ? (sampling ? 64 : 20_000) : 1
             let pc = sim.cpu.pc
             if !first && condition == nil && breakpointAddresses.contains(pc) {
@@ -473,10 +504,16 @@ final class DebugController: ObservableObject {
         pendingUART = ["", "", "", ""]
         outputLock.unlock()
         let coverage = stillRunning ? nil : sim.cpu.coverage
+        var frame: [UInt16]?
+        if let lcd = lpc?.lcd, lcd.isActive, lcd.frameCount != lcdFrameCount {
+            lcdFrameCount = lcd.frameCount
+            frame = lcd.pixels
+        }
         DispatchQueue.main.async {
             if !stillRunning { self.previous = self.snapshot }
             self.snapshot = snap
             if !output.isEmpty { self.printfOutput += output }
+            if let frame { self.lcdFrame = frame }
             for i in 0..<4 where !uart[i].isEmpty { self.uartOutput[i] += uart[i] }
             if let coverage {
                 self.executionCounts = coverage

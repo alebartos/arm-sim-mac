@@ -79,6 +79,7 @@ public final class CPU {
 
     /// R0-R15. R13 is the active stack pointer, R15 the address of the next instruction.
     public var r = [UInt32](repeating: 0, count: 16)
+    private var savedRegs = [UInt32](repeating: 0, count: 16)
     public var n = false, z = false, c = false, v = false, q = false
     /// APSR.GE[3:0] (DSP extension).
     public var ge: UInt32 = 0
@@ -101,10 +102,22 @@ public final class CPU {
     public var stopOnFault = false
     var pendingExceptionReturn: UInt32?
     /// Peripherals that count processor clocks.
-    public var clockedDevices: [ClockedDevice] = []
+    public var clockedDevices: [ClockedDevice] = [] { didSet { deviceHorizon = 0 } }
+    /// Clocks not yet given to `clockedDevices`: they are advanced in one call when their next event
+    /// is due or before any peripheral register access, which gives the same result as per-clock ticks.
+    private var deviceDebt: UInt64 = 0
+    private var deviceHorizon: UInt64 = 0
     /// Code coverage: execution count per instruction address (when enabled).
     public var recordCoverage = false
-    public internal(set) var coverage: [UInt32: UInt64] = [:]
+    /// Execution counts per halfword for the first 1 MB (flash and low code), others in a dictionary.
+    private var coverageLow = [UInt64](repeating: 0, count: 0)
+    private var coverageHigh: [UInt32: UInt64] = [:]
+    private static let coverageLowLimit: UInt32 = 0x0010_0000
+    public var coverage: [UInt32: UInt64] {
+        var result = coverageHigh
+        for (i, n) in coverageLow.enumerated() where n != 0 { result[UInt32(i) << 1] = n }
+        return result
+    }
 
     public internal(set) var cycles: UInt64 = 0
     public internal(set) var instructionCount: UInt64 = 0
@@ -128,6 +141,8 @@ public final class CPU {
         self.memory = memory
         self.system = SystemControl(numberOfIRQs: arch == .armv6m ? 32 : 64,
                                     priorityBits: arch == .armv6m ? 2 : 4)
+        memory.willAccessDevice = { [unowned self] in self.syncDevices() }
+        memory.didWriteDevice = { [unowned self] in self.devicesChanged() }
     }
 
     // MARK: Register accessors
@@ -199,7 +214,10 @@ public final class CPU {
         exclusiveMonitor = false
         sleeping = false
         pendingExceptionReturn = nil
-        coverage = [:]
+        coverageLow = []
+        coverageHigh = [:]
+        deviceDebt = 0
+        deviceHorizon = 0
         system.resetState()
         cycles = 0
         instructionCount = 0
@@ -252,12 +270,12 @@ public final class CPU {
         if sleeping {
             if system.highestPending() != nil {
                 sleeping = false // woken, but the exception is masked: continue after WFI
-            } else if let clocks = ([system.clocksUntilSysTickInterrupt()] + clockedDevices.map { $0.cyclesUntilEvent() })
-                        .compactMap({ $0 }).min() {
+            } else if let clocks = cyclesUntilNextEvent() {
                 let step = max(clocks, 1)
                 cycles &+= step
                 system.tickSysTick(step)
-                for device in clockedDevices { device.tick(step) }
+                deviceDebt &+= step
+                syncDevices()
                 return .none
             } else {
                 return .sleeping
@@ -274,8 +292,36 @@ public final class CPU {
             return event
         }
         system.tickSysTick(1)
-        for device in clockedDevices { device.tick(1) }
+        deviceDebt &+= 1
+        if deviceDebt >= deviceHorizon { syncDevices() }
         return event
+    }
+
+    /// Give the clocked peripherals the clocks they are owed, then note when they next need a tick.
+    public func syncDevices() {
+        if deviceDebt > 0 {
+            let debt = deviceDebt
+            deviceDebt = 0
+            for device in clockedDevices { device.tick(debt) }
+        }
+        var horizon: UInt64 = 1 << 16
+        for device in clockedDevices {
+            if let c = device.cyclesUntilEvent(), c < horizon { horizon = max(c, 1) }
+        }
+        deviceHorizon = horizon
+    }
+
+    /// A peripheral register was written: its next event may have moved.
+    public func devicesChanged() { deviceHorizon = 0 }
+
+    /// Fewest processor clocks until SysTick or a peripheral may raise an interrupt (no allocation).
+    private func cyclesUntilNextEvent() -> UInt64? {
+        syncDevices()
+        var best = system.clocksUntilSysTickInterrupt()
+        for device in clockedDevices {
+            if let c = device.cyclesUntilEvent(), c < (best ?? .max) { best = c }
+        }
+        return best
     }
 
     private func executeInstruction() throws {
@@ -294,21 +340,22 @@ public final class CPU {
 
         let inIT = itState & 0xF != 0
         let isITInstruction = !is32 && hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0
-        let savedRegs = r
+        // Register backup for faults (an in-place copy: `let saved = r` would allocate on every write).
+        for i in 0..<16 { savedRegs[i] = r[i] }
 
         do {
             if !inIT || conditionPassed(UInt32(itState >> 4)) {
                 if is32 { try execute32(hw1, hw2) } else { try execute16(hw1) }
             }
         } catch let e as BusError {
-            r = savedRegs
+            for i in 0..<16 { r[i] = savedRegs[i] }
             throw CPUFault.bus(e, pc: curPC)
         } catch is UndefinedInstruction {
             throw CPUFault.undefinedInstruction(pc: curPC, opcode: opcode)
         } catch let e as Unsupported {
             throw CPUFault.unsupported(pc: curPC, opcode: opcode, feature: e.feature)
         } catch let e as UnalignedAccess {
-            r = savedRegs
+            for i in 0..<16 { r[i] = savedRegs[i] }
             throw CPUFault.unaligned(pc: curPC, address: e.address)
         } catch let e as InvalidStateBranch {
             throw CPUFault.invalidState(pc: curPC, target: e.target)
@@ -317,7 +364,14 @@ public final class CPU {
         }
 
         if inIT && !isITInstruction { advanceIT() }
-        if recordCoverage { coverage[curPC, default: 0] &+= 1 }
+        if recordCoverage {
+            if curPC < Self.coverageLowLimit {
+                if coverageLow.isEmpty { coverageLow = [UInt64](repeating: 0, count: Int(Self.coverageLowLimit >> 1)) }
+                coverageLow[Int(curPC >> 1)] &+= 1
+            } else {
+                coverageHigh[curPC, default: 0] &+= 1
+            }
+        }
         cycles &+= 1
         instructionCount &+= 1
         if let excReturn = pendingExceptionReturn {

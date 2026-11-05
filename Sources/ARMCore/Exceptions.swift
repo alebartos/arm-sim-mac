@@ -40,7 +40,11 @@ public final class SystemControl {
     public var priorityBits: Int
 
     public internal(set) var enabled: [Bool]
-    public internal(set) var pending: [Bool]
+    public internal(set) var pending: [Bool] {
+        didSet { anyPending = pending.contains(true) }
+    }
+    /// Fast path for the per-instruction check: nothing pending at all.
+    private(set) var anyPending = false
     public internal(set) var active: [Bool]
     public internal(set) var priority: [UInt8]
 
@@ -131,6 +135,7 @@ public final class SystemControl {
 
     /// Highest-priority pending and enabled exception (lowest number wins ties).
     func highestPending() -> Int? {
+        guard anyPending else { return nil }
         var best: Int?
         var bestPriority = Int.max
         for n in 1..<pending.count where pending[n] && enabled[n] {

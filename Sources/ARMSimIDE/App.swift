@@ -365,6 +365,19 @@ extension SmokeTest {
                     d.setJoystick(direction, pressed: true)
                 }
                 d.run()
+                // Touch script "x,y;x,y;...": each point held 0.4 s, then released 0.4 s.
+                let touches = (ProcessInfo.processInfo.environment["ARMSIM_SMOKE_TOUCH"] ?? "").split(separator: ";")
+                    .compactMap { pair -> (x: Int, y: Int)? in
+                        let v = pair.split(separator: ",").compactMap { Int($0) }
+                        return v.count == 2 ? (v[0], v[1]) : nil
+                    }
+                let env = ProcessInfo.processInfo.environment
+                let start = env["ARMSIM_SMOKE_TOUCH_START"].flatMap(Double.init) ?? 0.5
+                let hold = env["ARMSIM_SMOKE_TOUCH_HOLD"].flatMap(Double.init) ?? 0.4
+                for (i, p) in touches.enumerated() {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + start + Double(i) * 2 * hold) { d.setTouch(p) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + start + hold + Double(i) * 2 * hold) { d.setTouch(nil) }
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                     d.stop()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: stepLoop)
@@ -384,6 +397,11 @@ extension SmokeTest {
                 if let lpc = d.lpc {
                     say(String(format: "P2 out 0x%02X dir 0x%02X, DAC %d, ADC AD0.5 input 0x%03X, P1 in 0x%08X, %llu cycles", lpc.gpio.output[2] & 0xFF,
                                lpc.gpio.direction[2] & 0xFF, lpc.dac.value, lpc.adc.inputs[5], lpc.gpio.input[1], d.snapshot.cycles))
+                }
+                if let frame = d.lcdFrame, let image = LCDImage.make(frame) {
+                    let rep = NSBitmapImageRep(cgImage: image)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: url.deletingLastPathComponent().appendingPathComponent("lcd.png"))
+                    say("lcd: \(Set(frame).count) colors")
                 }
                 if let window = NSApp.windows.first(where: { $0.isVisible }), let view = window.contentView,
                    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {

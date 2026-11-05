@@ -45,6 +45,8 @@ public final class MemoryRegion {
     public let kind: Kind
     /// Backing store for RAM/ROM regions (empty for MMIO).
     public internal(set) var bytes: [UInt8]
+    /// Accesses must see clocked peripherals up to date (timers, or registers that change their clocks).
+    public var clockSensitive = false
 
     init(name: String, base: UInt32, size: UInt32, kind: Kind) {
         self.name = name
@@ -97,8 +99,11 @@ public final class MemoryMap {
     }
 
     @discardableResult
-    public func addMMIO(name: String, base: UInt32, size: UInt32, device: MMIODevice) -> MemoryRegion {
-        add(MemoryRegion(name: name, base: base, size: size, kind: .mmio(device)))
+    public func addMMIO(name: String, base: UInt32, size: UInt32, device: MMIODevice,
+                        clockSensitive: Bool? = nil) -> MemoryRegion {
+        let region = MemoryRegion(name: name, base: base, size: size, kind: .mmio(device))
+        region.clockSensitive = clockSensitive ?? (device is ClockedDevice)
+        return add(region)
     }
 
     private func add(_ region: MemoryRegion) -> MemoryRegion {
@@ -112,6 +117,11 @@ public final class MemoryMap {
         regions.sort { $0.base < $1.base }
         return region
     }
+
+    /// Called before a peripheral register access (the CPU brings its clocked devices up to date).
+    public var willAccessDevice: (() -> Void)?
+    /// Called after a peripheral register write.
+    public var didWriteDevice: (() -> Void)?
 
     public func region(containing address: UInt32) -> MemoryRegion? {
         if let r = lastHit, r.contains(address, 1) { return r }
@@ -136,6 +146,7 @@ public final class MemoryMap {
         let r = try find(address, size, write: false)
         let offset = Int(address &- r.base)
         if case .mmio(let device) = r.kind {
+            if r.clockSensitive { willAccessDevice?() }
             return device.read(offset: UInt32(offset), size: size)
         }
         return r.bytes.withUnsafeBufferPointer { p in
@@ -151,7 +162,9 @@ public final class MemoryMap {
         let offset = Int(address &- r.base)
         switch r.kind {
         case .mmio(let device):
+            if r.clockSensitive { willAccessDevice?() }
             device.write(offset: UInt32(offset), size: size, value: value)
+            if r.clockSensitive { didWriteDevice?() }
         case .rom:
             throw BusError(address: address, size: size, isWrite: true)
         case .ram:
