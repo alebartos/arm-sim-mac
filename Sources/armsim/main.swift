@@ -98,6 +98,19 @@ while !arguments.isEmpty {
             FileHandle.standardError.write(Data("\(file):\(d.line): \(d.isError ? "error" : "warning"): \(d.message)\n".utf8))
         }
         exit(result.diagnostics.contains { $0.isError } ? 1 : 0)
+    case "--encode":
+        // One instruction per stdin line -> halfwords (like a Keil listing) or "ERR <message>".
+        while let line = readLine() {
+            do {
+                let bytes = try ArmasmAssembler.assembleInstruction(line, arch: arch)
+                print(stride(from: 0, to: bytes.count - 1, by: 2).map {
+                    String(format: "%04X", UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8)
+                }.joined(separator: " "))
+            } catch {
+                print("ERR \(error)")
+            }
+        }
+        exit(0)
     case "--assemble":
         // --assemble <file.s> <out.o>: native armasm assembler (respects a preceding --cpu).
         let file = value(), out = value()

@@ -859,11 +859,12 @@ func runLPCTest(native: Bool) throws -> String? {
 
 /// Unified-syntax instructions assembled by both clang and the native encoder (outside IT blocks).
 let encoderCorpus: [String] = [
+    // Where Keil and clang disagree Keil wins and the case lives in keilConfirmed (e.g. ADD #-48 -> SUBW).
     "movs r0, #3", "mov r0, #3", "mov r8, #1", "mov r1, #-1", "mov r2, #0xFF00FF00",
     "mvn r3, #0", "movw r4, #0x1234", "movt r4, #0xBEEF", "mov r0, #0x1234", "movs r0, r1", "mov r0, r1", "mov r8, r9",
     "mov sp, r0", "movs r8, r1", "mvns r1, r2", "mvn r1, r2", "mvn r1, r2, lsl #3",
     "adds r0, r1, r2", "add r0, r1, r2", "add r0, r0, r1", "add r0, r1", "add r8, r1", "adds r0, r0, #1", "adds r1, r0, #1",
-    "adds r0, #200", "add r0, r0, #200", "add r0, r1, #4095", "add r0, r1, #0x10000", "add r0, r1, #-4", "adds r0, r1, #-4",
+    "adds r0, #200", "add r0, r0, #200", "add r0, r1, #4095", "add r0, r1, #0x10000", "adds r0, r1, #-4",
     "add sp, sp, #16", "add sp, #508", "sub sp, sp, #8", "add r0, sp, #8", "add r8, sp, #8", "add.w r0, r1, r2, lsl #2",
     "subs r0, r1, r2", "sub r0, r1, r2", "subs r0, #1", "sub r0, r0, #1", "subs r2, r3, #7", "sub r0, r1, #4000",
     "addw r0, r1, #1000", "subw r0, r1, #1000", "adc r0, r1, r2", "adcs r0, r0, r1", "adcs r0, r1", "sbcs r2, r2, r3", "sbc r0, r1, #5",
@@ -957,6 +958,61 @@ func runEncoderCorpus(_ lines: [String], profile: Profile) throws -> String? {
         }
     }
     return problems.isEmpty ? nil : "\(problems.count) mismatches:\n      " + problems.joined(separator: "\n      ")
+}
+
+/// Encodings taken from Keil armasm listings (public GitHub projects + PoliTo templates).
+let keilConfirmed: [(line: String, bytes: String)] = [
+    ("STMFD SP!, {R4, LR}", "B510"), ("STMFD SP!, {R0-R4, LR}", "B51F"), ("STMDB SP!, {R4, R5}", "B430"),
+    ("STMFD SP!, {R4-R11, LR}", "E92D 4FF0"), ("PUSH {R12, LR}", "E92D 5000"), ("PUSH {R0, LR}", "B501"),
+    ("STMFD r1!, {r4}", "F841 4D04"), ("STMFD r0!, {lr}", "F840 ED04"), ("LDMFD R0!, {LR}", "F850 EB04"),
+    ("ADD R1, PC, #0", "A100"), ("ADD R1, R1, #-1", "F101 31FF"), ("add r4, r4, #-48", "F2A4 0430"),
+    ("ADD R2, R0, #0xc3a", "F600 423A"), ("SUB R0, #1", "F1A0 0001"), ("ADD SP, SP, #4", "B001"),
+    ("LDR R3, =0x121", "F240 1321"), ("LDR R2, =0xFFFF", "F64F 72FF"), ("LDR R0, =1017", "F240 30F9"),
+    ("LDR R2, =500", "F44F 72FA"), ("LDR r5, =10", "F04F 050A"), ("LDR R1, =0x00FFFFFF", "F06F 417F"),
+    ("LDR R3, =0xFFFFFFFF", "F04F 33FF"), ("LDR R3, =0x11111111", "F04F 3311"),
+    ("MRS R0, PRIMASK", "F3EF 8010"), ("MSR PRIMASK, R0", "F380 8810"), ("CPSID I", "B672"),
+    ("LDRD r4, r5, [r0]", "E9D0 4500"), ("STR R8, [sp, #8]", "F8CD 8008"), ("LSR R0, #16", "EA4F 4010"),
+]
+
+/// Implicit IT blocks exactly as Keil groups them (746.lst): a BL/BLX ends the block, blank lines don't.
+let keilImplicitIT = (source: """
+        AREA |.text|, CODE, READONLY
+        IMPORT store
+        STMFDEQ SP!, {R0-R12, LR}
+        BLEQ    store
+        LDMFDEQ SP!, {R0-R12, LR}
+        SUBEQ   R3, R3, #1
+
+        STREQ   R0, [SP, #4]
+        SUBEQ   R9, R11, R3
+        MOVEQ   R0, R9
+        STMFDEQ SP!, {R0-R4, LR}
+        BLXEQ   R12
+        LDMFDEQ SP!, {R0-R4, LR}
+        LDREQ   R0, [SP, #4]
+        MOVEQ   R9, #1
+        MOVEQ   R10, #0
+        END
+""", bytes: "BF04 E92D 5FFF F7FF FFFE BF01 E8BD 5FFF 1E5B 9001 EBAB 0903 BF02 4648 B51F 47E0 BF01 E8BD 401F 9801 F04F 0901 F04F 0A00")
+
+func halfwords(_ bytes: [UInt8]) -> String {
+    stride(from: 0, to: bytes.count - 1, by: 2).map { String(format: "%04X", UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8) }
+        .joined(separator: " ")
+}
+
+func runKeilConfirmed() throws -> String? {
+    var problems: [String] = []
+    for (line, expected) in keilConfirmed {
+        do {
+            let ours = halfwords(try ArmasmAssembler.assembleInstruction(line))
+            if ours != expected { problems.append("'\(line)': ours \(ours), Keil \(expected)") }
+        } catch { problems.append("'\(line)': \(error)") }
+    }
+    let output = ArmasmAssembler.assemble(source: keilImplicitIT.source, path: workDir.appendingPathComponent("it.s").path)
+    if let e = output.diagnostics.first(where: \.isError) { problems.append("IT program: \(e.message)") }
+    let code = output.listing.filter(\.isCode).flatMap(\.bytes)
+    if halfwords(code) != keilImplicitIT.bytes { problems.append("implicit IT blocks:\n        ours \(halfwords(code))\n        Keil \(keilImplicitIT.bytes)") }
+    return problems.isEmpty ? nil : problems.joined(separator: "\n      ")
 }
 
 /// Exercises the armasm features clang never sees: macros, WHILE, SETA, numeric labels, pools.
@@ -1096,6 +1152,7 @@ print("\n== Native armasm assembler")
 report("[M3] encoder vs clang (\(encoderCorpus.count) instructions)") { try runEncoderCorpus(encoderCorpus, profile: profiles[0]) }
 report("[M3] native: armasm startup + SVC + tables") { try runArmasmTest(native: true) }
 report("[M3] native: LPC17xx timers, interrupts, GPIO") { try runLPCTest(native: true) }
+report("[M3] native: \(keilConfirmed.count + 1) encodings confirmed by Keil listings") { try runKeilConfirmed() }
 report("[M3] native: macros, WHILE, IF, local labels, literal pools, implicit IT") { try runArmasmFeatureTest() }
 if FileManager.default.fileExists(atPath: "templates/01_SVC/Objects/SVC.axf") {
     report("[M3] native: 01_SVC template links byte-identical to Keil's SVC.axf") { try runKeilTemplateTest() }

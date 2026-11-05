@@ -444,16 +444,33 @@ private struct Encoder {
     }
 
     /// `twoOperandForm`: written "ADDS Rd, #imm" (prefers the imm8 encoding over imm3, like LLVM).
+    /// Order for a negative ADD/SUB immediate, as armasm does it (checked on Keil listings):
+    /// a 16-bit form of the opposite operation, then the original 32-bit modified immediate
+    /// (`ADD r1,r1,#-1` stays ADD.W #0xFFFFFFFF), then the opposite operation preferring
+    /// ADDW/SUBW (`ADD r4,r4,#-48` -> SUBW r4,r4,#48).
     func dpImmediate(_ name: String, rd: Int, rn: Int, value: Int64, allowSubstitution: Bool,
-                     twoOperandForm: Bool = false) throws -> AsmEncoded {
+                     twoOperandForm: Bool = false, narrowOnly: Bool = false, preferImm12: Bool = false) throws -> AsmEncoded {
         let v32 = UInt32(truncatingIfNeeded: value)
         let isAddSub = name == "ADD" || name == "SUB"
-        // A negative ADD/SUB immediate is written as the opposite operation.
-        if isAddSub && allowSubstitution && value < 0 && value != Int64(Int32.min) {
-            return try dpImmediate(name == "ADD" ? "SUB" : "ADD", rd: rd, rn: rn, value: -value, allowSubstitution: false,
-                                   twoOperandForm: twoOperandForm)
-        }
         guard value >= Int64(Int32.min) && value <= Int64(UInt32.max) else { throw fail("immediate out of range") }
+        if isAddSub && allowSubstitution && value < 0 && value != Int64(Int32.min) {
+            let other = name == "ADD" ? "SUB" : "ADD"
+            if let r = try? dpImmediate(other, rd: rd, rn: rn, value: -value, allowSubstitution: false,
+                                        twoOperandForm: twoOperandForm, narrowOnly: true) { return r }
+            if rn != 15, let r = try? dpImmediate(name, rd: rd, rn: rn, value: value, allowSubstitution: false) { return r }
+            return try dpImmediate(other, rd: rd, rn: rn, value: -value, allowSubstitution: false,
+                                   twoOperandForm: twoOperandForm, preferImm12: true)
+        }
+        if isAddSub && rn == 15 {
+            // ADD/SUB Rd, PC, #imm is ADR (base Align(PC, 4)).
+            guard !ins.setFlags, v32 <= 4095 else { throw fail("PC-relative offset out of range") }
+            if name == "ADD" && narrowAllowed && isLow(rd) && v32 % 4 == 0 && v32 <= 1020 {
+                return ThumbEncoder.t16(0xA000 | UInt32(rd) << 8 | v32 >> 2)
+            }
+            guard !narrowOnly else { throw fail("no 16-bit form") }
+            let (i, imm3, imm8) = ThumbEncoder.splitImm12(v32)
+            return ThumbEncoder.t32((name == "ADD" ? 0xF20F : 0xF2AF) | i << 10, imm3 << 12 | UInt32(rd) << 8 | imm8)
+        }
 
         if isAddSub && narrowAllowed {
             let add = name == "ADD"
@@ -474,6 +491,11 @@ private struct Encoder {
         }
         if name == "RSB" && value == 0 && narrowFlagsOK && isLow(rd) && isLow(rn) {
             return ThumbEncoder.t16(0x4240 | UInt32(rn) << 3 | UInt32(rd))
+        }
+        guard !narrowOnly else { throw fail("no 16-bit form") }
+        if preferImm12 && isAddSub && !ins.setFlags && v32 <= 4095 {
+            let (i, imm3, imm8) = ThumbEncoder.splitImm12(v32)
+            return ThumbEncoder.t32((name == "ADD" ? 0xF200 : 0xF2A0) | i << 10 | UInt32(rn), imm3 << 12 | UInt32(rd) << 8 | imm8)
         }
         if let imm12 = ThumbEncoder.modifiedImmediate(v32) {
             let (i, imm3, imm8) = ThumbEncoder.splitImm12(imm12)
@@ -888,9 +910,16 @@ private struct Encoder {
                 if isLoad && writeback != inList { return ThumbEncoder.t16(0xC800 | UInt32(rn) << 8 | UInt32(list)) }
             }
         }
-        if rn == 13 && writeback && list.nonzeroBitCount == 1 && ((decrement && !isLoad) || (!decrement && isLoad)) {
+        if list.nonzeroBitCount == 1 {
+            // A 32-bit LDM/STM needs two registers: armasm uses LDR/STR (Keil: STMFD r1!,{r4} -> STR r4,[r1,#-4]!).
             let rt = UInt32(list.trailingZeroBitCount)
-            return isLoad ? ThumbEncoder.t32(0xF85D, rt << 12 | 0xB04) : ThumbEncoder.t32(0xF84D, rt << 12 | 0xD04)
+            let hw1 = (isLoad ? 0xF850 : 0xF840) | UInt32(rn)
+            switch (decrement, writeback) {
+            case (false, true): return ThumbEncoder.t32(hw1, rt << 12 | 0xB04)          // [Rn], #4
+            case (true, true): return ThumbEncoder.t32(hw1, rt << 12 | 0xD04)           // [Rn, #-4]!
+            case (false, false): return ThumbEncoder.t32(hw1 | 0x80, rt << 12)          // [Rn]
+            case (true, false): return ThumbEncoder.t32(hw1, rt << 12 | 0xC04)          // [Rn, #-4]
+            }
         }
         let hw1: UInt32 = (decrement ? 0xE900 : 0xE880) | (isLoad ? 0x10 : 0) | (writeback ? 0x20 : 0) | UInt32(rn)
         return ThumbEncoder.t32(hw1, UInt32(list))

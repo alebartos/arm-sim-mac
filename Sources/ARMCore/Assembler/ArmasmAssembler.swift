@@ -783,9 +783,15 @@ private final class Assembly: ExprEnvironment {
             let c = UInt32(truncatingIfNeeded: v.constant)
             let m = ThumbEncoder.parseMnemonic(mnemonic)!
             let suffix = String(mnemonic.dropFirst(3)) // condition / qualifier
-            if ThumbEncoder.modifiedImmediate(c) != nil || (m.width != .narrow && ThumbEncoder.modifiedImmediate(~c) != nil) {
-                let op = ThumbEncoder.modifiedImmediate(c) != nil ? "MOV" : "MVN"
-                let value = op == "MOV" ? c : ~c
+            // Keil listings: MOV.W if a modified immediate, else MVN, else MOVW (Thumb-2 only).
+            var op: String?
+            var value = c
+            if options.arch.hasThumb2 && m.width != .narrow {
+                if ThumbEncoder.modifiedImmediate(c) != nil { op = "MOV" }
+                else if ThumbEncoder.modifiedImmediate(~c) != nil { op = "MVN"; value = ~c }
+                else if c <= 0xFFFF { op = "MOVW" }
+            }
+            if let op {
                 append(Statement(file: source.file, line: source.line, label: label,
                                  kind: .instruction(mnemonic: op + suffix, operands: "\(register), #0x\(String(value, radix: 16))"), area: currentArea))
                 return
@@ -918,12 +924,16 @@ private final class Assembly: ExprEnvironment {
                 continue
             }
             guard cond != 14, mnemonic != "B" else { i += 1; continue }
-            // Group following conditional instructions (same or inverse condition, no labels).
+            // Group following conditional instructions (same or inverse condition, no labels), like
+            // armasm: up to 4, and a BX/BLX/BL ends the block (checked on 162 blocks in Keil listings).
+            let endsBlock: Set<String> = ["BX", "BLX", "BL"]
             var pattern = ""
             var j = i + 1
-            while j < statements.count && pattern.count < 3 && statements[j].label == nil,
+            var closed = endsBlock.contains(mnemonic)
+            while !closed && j < statements.count && pattern.count < 3 && statements[j].label == nil,
                   let (c, m) = condition(of: statements[j]), m != "B", c != 14, c == cond || c == cond ^ 1 {
                 pattern += c == cond ? "T" : "E"
+                closed = endsBlock.contains(m)
                 j += 1
             }
             statements[i].implicitIT = (pattern, cond)
