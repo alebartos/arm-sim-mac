@@ -1036,12 +1036,12 @@ func runArmasmFeatureTest() throws -> String? {
 }
 
 /// The LandTiger course template (01_SVC) must link to the same bytes as Keil's own SVC.axf.
-func runKeilTemplateTest() throws -> String? {
-    let output = ArmasmAssembler.assemble(fileAt: "01_SVC/Source/template.s")
+func runKeilTemplateTest(source: String = "templates/01_SVC/Source/template.s", axf: String = "templates/01_SVC/Objects/SVC.axf") throws -> String? {
+    let output = ArmasmAssembler.assemble(fileAt: source)
     if let error = output.diagnostics.first(where: \.isError) { return "line \(error.line): \(error.message)" }
     let ours = try Linker.link(objects: [(name: "template.o", bytes: output.object!)],
                                layout: LinkLayout(romBase: 0, romSize: 0x8_0000, ramBase: 0x1000_0000, ramSize: 0x8000))
-    let keil = try ELFLoader.parse([UInt8](try Data(contentsOf: URL(fileURLWithPath: "01_SVC/Objects/SVC.axf"))))
+    let keil = try ELFLoader.parse([UInt8](try Data(contentsOf: URL(fileURLWithPath: axf))))
     func flat(_ image: ELFImage) -> [UInt32: UInt8] {
         var bytes: [UInt32: UInt8] = [:]
         for s in image.segments where !s.isZeroInitialized && s.address < 0x1000_0000 {
@@ -1097,8 +1097,15 @@ report("[M3] encoder vs clang (\(encoderCorpus.count) instructions)") { try runE
 report("[M3] native: armasm startup + SVC + tables") { try runArmasmTest(native: true) }
 report("[M3] native: LPC17xx timers, interrupts, GPIO") { try runLPCTest(native: true) }
 report("[M3] native: macros, WHILE, IF, local labels, literal pools, implicit IT") { try runArmasmFeatureTest() }
-if FileManager.default.fileExists(atPath: "01_SVC/Objects/SVC.axf") {
+if FileManager.default.fileExists(atPath: "templates/01_SVC/Objects/SVC.axf") {
     report("[M3] native: 01_SVC template links byte-identical to Keil's SVC.axf") { try runKeilTemplateTest() }
+}
+// PoliTo course templates (templates/, not in git): assembly-only projects with a Keil-built .axf.
+for (source, axf) in [("templates/00_ASM_template/Source/startup.s", "templates/00_ASM_template/Objects/ASM_template.axf")]
+where FileManager.default.fileExists(atPath: axf) {
+    report("[M3] native: \(source.split(separator: "/")[1]) links byte-identical to Keil") {
+        try runKeilTemplateTest(source: source, axf: axf)
+    }
 }
 report("[M0] encoder vs clang (\(encoderCorpusM0.count) instructions)") { try runEncoderCorpus(encoderCorpusM0, profile: profiles[1]) }
 

@@ -1280,10 +1280,7 @@ private final class Assembly: ExprEnvironment {
             let start = cursor[area]
             let aligned = (start + alignment - 1) / alignment * alignment
             if emit && aligned > start {
-                var fill = [UInt8](repeating: 0, count: aligned - start)
-                if code && areas[area].isCode && start % 2 == 0 {
-                    for k in stride(from: 0, to: fill.count - 1, by: 2) { fill[k] = 0x00; fill[k + 1] = 0xBF }
-                }
+                let fill = [UInt8](repeating: 0, count: aligned - start)
                 sectionBytes[area] += fill
             }
             cursor[area] = aligned
@@ -1367,12 +1364,8 @@ private final class Assembly: ExprEnvironment {
                 var target = start
                 while (target - offset) % alignment != 0 { target += 1 }
                 if emit && target > start && !areas[area].isNoInit {
-                    let inCode = areas[area].isCode && lastIsData[area] == false
-                    var fill = [UInt8](repeating: 0, count: target - start)
-                    if inCode && start % 2 == 0 && fill.count % 2 == 0 {
-                        for k in stride(from: 0, to: fill.count, by: 2) { fill[k] = 0x00; fill[k + 1] = 0xBF }
-                    }
-                    sectionBytes[area] += fill
+                    // armasm pads ALIGN with zeros, also in code areas (Keil listings: "00 00  ALIGN").
+                    sectionBytes[area] += [UInt8](repeating: 0, count: target - start)
                 }
                 s.padding = target - start
                 cursor[area] = target
