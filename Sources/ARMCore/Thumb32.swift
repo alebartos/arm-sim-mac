@@ -14,7 +14,8 @@ extension CPU {
         switch op1 {
         case 1:
             if h1 & 0x400 != 0 {
-                throw Unsupported(feature: "coprocessor / FPU instruction")
+                guard hasFPU else { throw Unsupported(feature: "coprocessor / FPU instruction (core without FPU)") }
+                try coprocessorInstruction(h1, h2)
             } else if h1 & 0x200 != 0 {
                 try dataProcessingShiftedRegister(h1, h2)
             } else if h1 & 0x40 == 0 {
@@ -31,7 +32,11 @@ extension CPU {
                 try dataProcessingPlainImmediate(h1, h2)
             }
         default:
-            if h1 & 0x400 != 0 { throw Unsupported(feature: "coprocessor / FPU instruction") }
+            if h1 & 0x400 != 0 {
+                guard hasFPU else { throw Unsupported(feature: "coprocessor / FPU instruction (core without FPU)") }
+                try coprocessorInstruction(h1, h2)
+                return
+            }
             switch h1 >> 8 {
             case 0xF8, 0xF9: try loadStoreSingle(h1, h2)
             case 0xFA: try dataProcessingRegister(h1, h2)
@@ -152,14 +157,14 @@ extension CPU {
             let source = rn == 15 ? 0 : R(rn)
             W(rd, (R(rd) & ~mask) | ((source << lsb) & mask))
         case 0b10000, 0b10010: // SSAT (SSAT16 when ASR #0)
-            if op == 0b10010 && lsb == 0 { throw Unsupported(feature: "SSAT16") }
+            if op == 0b10010 && lsb == 0 { try saturate16(h1, h2, signed: true); return }
             let (type, amount) = decodeImmShift(op == 0b10010 ? 2 : 0, lsb)
             let operand = shiftC(R(rn), type, amount, c).0
             let (result, saturated) = signedSat(Int64(Int32(bitPattern: operand)), field + 1)
             W(rd, result)
             if saturated { q = true }
         case 0b11000, 0b11010: // USAT (USAT16 when ASR #0)
-            if op == 0b11010 && lsb == 0 { throw Unsupported(feature: "USAT16") }
+            if op == 0b11010 && lsb == 0 { try saturate16(h1, h2, signed: false); return }
             let (type, amount) = decodeImmShift(op == 0b11010 ? 2 : 0, lsb)
             let operand = shiftC(R(rn), type, amount, c).0
             let (result, saturated) = unsignedSat(Int64(Int32(bitPattern: operand)), field)
@@ -414,12 +419,13 @@ extension CPU {
             case (1, 2): W(rd, rbit(x))                                                    // RBIT
             case (1, 3): W(rd, signExtend(((x & 0xFF) << 8) | ((x >> 8) & 0xFF), 16))      // REVSH
             case (3, 0): W(rd, UInt32(x.leadingZeroBitCount))                              // CLZ
-            default: throw Unsupported(feature: "DSP saturating/select instruction")
+            default: try saturatingOrSelect(h1, h2)
             }
             return
         }
 
-        throw Unsupported(feature: "DSP parallel add/subtract")
+        if op1 & 0b1000 != 0 && op2 & 0b1000 == 0 { try parallelAddSubtract(h1, h2); return }
+        throw UndefinedInstruction()
     }
 
     // MARK: Multiply, divide
@@ -428,7 +434,7 @@ extension CPU {
         let op1 = (h1 >> 4) & 7
         let op2 = (h2 >> 4) & 3
         let rn = h1 & 0xF, ra = (h2 >> 12) & 0xF, rd = (h2 >> 8) & 0xF, rm = h2 & 0xF
-        guard op1 == 0 else { throw Unsupported(feature: "DSP multiply") }
+        guard op1 == 0 else { try dspMultiply(h1, h2); return }
         switch op2 {
         case 0: W(rd, ra == 15 ? R(rn) &* R(rm) : R(ra) &+ R(rn) &* R(rm)) // MUL / MLA
         case 1: W(rd, R(ra) &- R(rn) &* R(rm))                              // MLS
@@ -467,7 +473,7 @@ extension CPU {
             if b == 0 && system.ccr & 0x10 != 0 { throw DivideByZero() }
             W(rdHi, b == 0 ? 0 : a / b)
         default:
-            throw Unsupported(feature: "DSP long multiply")
+            try dspLongMultiply(h1, h2)
         }
     }
 }

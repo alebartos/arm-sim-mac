@@ -499,6 +499,31 @@ enum RuntimeLibrary {
     }
     WEAK unsigned long strtoul(const char *s, char **end, int base) { return (unsigned long)strtol(s, end, base); }
     WEAK int atoi(const char *s) { return (int)strtol(s, 0, 10); }
+
+    /* math.h subset. With the FPU (hard-float build) sqrtf is one VSQRT. */
+    WEAK float fabsf(float x) { union { float f; u32 u; } v = { x }; v.u &= 0x7FFFFFFFu; return v.f; }
+    WEAK double fabs(double x) { union { double d; u64 u; } v = { x }; v.u &= 0x7FFFFFFFFFFFFFFFull; return v.d; }
+    WEAK double sqrt(double x) {
+        if (!(x > 0.0)) return x == 0.0 ? x : (x - x) / (x - x); /* -0, NaN */
+        union { double d; u64 u; } v = { x };
+        if ((v.u >> 52) == 0x7FF) return x;                         /* inf */
+        double r = x > 1.0 ? x : 1.0;
+        for (int i = 0; i < 64; i++) {                              /* Newton, monotone from above */
+            double next = 0.5 * (r + x / r);
+            if (next >= r) break;
+            r = next;
+        }
+        return r;
+    }
+    WEAK float sqrtf(float x) {
+    #if defined(__ARM_FP) && (__ARM_FP & 4)
+        float r;
+        __asm__("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
+        return r;
+    #else
+        return (float)sqrt((double)x);
+    #endif
+    }
     WEAK long atol(const char *s) { return strtol(s, 0, 10); }
     static u32 rand_state = 1;
     WEAK void srand(unsigned int seed) { rand_state = seed; }
@@ -782,6 +807,23 @@ enum RuntimeLibrary {
         #define __ARMSIM_CTYPE_H
         int isdigit(int); int isspace(int); int isalpha(int); int isalnum(int); int isxdigit(int);
         int isupper(int); int islower(int); int isprint(int); int toupper(int); int tolower(int);
+        #endif
+
+        """,
+        "math.h": """
+        #ifndef __ARMSIM_MATH_H
+        #define __ARMSIM_MATH_H
+        float sqrtf(float);
+        double sqrt(double);
+        float fabsf(float);
+        double fabs(double);
+        #define HUGE_VALF __builtin_huge_valf()
+        #define HUGE_VAL __builtin_huge_val()
+        #define INFINITY __builtin_inff()
+        #define NAN __builtin_nanf("")
+        #define M_PI 3.14159265358979323846
+        #define isnan(x) __builtin_isnan(x)
+        #define isinf(x) __builtin_isinf(x)
         #endif
 
         """,

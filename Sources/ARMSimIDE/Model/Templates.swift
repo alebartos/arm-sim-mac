@@ -9,6 +9,15 @@ enum Templates {
             irqVectors += "    .word IRQ\(i)_Handler\n"
             irqHandlers += "    weak_handler IRQ\(i)_Handler\n"
         }
+        let enableFPU = device.hasFPU ? """
+            ldr r0, =0xE000ED88         /* CPACR: CP10/CP11 full access (FPU) */
+            ldr r1, [r0]
+            orr r1, r1, #(0xF << 20)
+            str r1, [r0]
+            dsb
+            isb
+
+        """ : ""
         return """
         /*
          * startup_\(device.name).s - startup file for \(device.name) (\(device.core))
@@ -46,7 +55,7 @@ enum Templates {
             .thumb_func
             .type Reset_Handler, %function
         Reset_Handler:
-            ldr r1, =__etext            /* copy .data from flash to RAM */
+        \(enableFPU)    ldr r1, =__etext            /* copy .data from flash to RAM */
             ldr r2, =__data_start__
             ldr r3, =__data_end__
         1:  cmp r2, r3

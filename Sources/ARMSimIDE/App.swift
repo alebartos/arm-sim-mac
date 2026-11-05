@@ -290,8 +290,14 @@ enum SmokeTest {
         }
         try? FileManager.default.removeItem(at: folder)
         NSApp.windows.first { $0.isVisible }?.setContentSize(NSSize(width: 1360, height: 860))
-        ws.newProject(at: folder.appendingPathComponent("Demo"), device: .builtIn(DeviceInfo.named("ARMCM3")))
+        let env = ProcessInfo.processInfo.environment
+        ws.newProject(at: folder.appendingPathComponent("Demo"), device: .builtIn(DeviceInfo.named(env["ARMSIM_SMOKE_DEVICE"] ?? "ARMCM3")))
         say("project: \(ws.projectURL?.path ?? "nil")")
+        if env["ARMSIM_SMOKE_FPU"] != nil { ws.project?.options.useFPU = true }
+        if let main = env["ARMSIM_SMOKE_MAIN"], let dir = ws.projectDirectory {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("main.c"))
+            try? FileManager.default.copyItem(at: URL(fileURLWithPath: main), to: dir.appendingPathComponent("main.c"))
+        }
         ws.toggleDebugSession()
         after(4) {
             say("build log:\n" + ws.buildLog.map(\.text).joined(separator: "\n"))

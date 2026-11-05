@@ -16,6 +16,10 @@ struct CPUSnapshot: Equatable {
     var cycles: UInt64 = 0
     var instructions: UInt64 = 0
     var sleeping = false
+    // FPU (Cortex-M4F)
+    var hasFPU = false
+    var fp = [UInt32](repeating: 0, count: 32)
+    var fpscr: UInt32 = 0
     // Core peripherals
     var sysTickCSR: UInt32 = 0
     var sysTickReload: UInt32 = 0
@@ -238,11 +242,12 @@ final class DebugController: ObservableObject {
             memory.addRAM(name: "IRAM2", base: base, size: size)
         }
         let sim = Simulator(arch: product.device.architecture, memory: memory)
+        sim.cpu.hasFPU = product.device.hasFPU && o.useFPU == true
         // Behavioural peripheral models where available (LandTiger / LPC17xx)...
         lpc = product.device.name.uppercased().hasPrefix("LPC17") ? LPC17xx.install(on: sim) : nil
         lpc?.adc.inputs[5] = UInt16((potentiometer * 4095).rounded())
         lpc?.systemControl.crystalHz = o.xtalMHz * 1_000_000
-        lcdFrame = nil
+        DispatchQueue.main.async { self.lcdFrame = nil } // published: main thread only
         lcdFrameCount = .max
         // ...and generic registers (hold written values) for the rest of the peripheral space.
         let generic = GenericPeripheralDevice()
@@ -507,6 +512,11 @@ final class DebugController: ObservableObject {
         s.cycles = cpu.cycles
         s.instructions = cpu.instructionCount
         s.sleeping = cpu.sleeping
+        if cpu.hasFPU {
+            s.hasFPU = true
+            s.fp = cpu.fpRegs
+            s.fpscr = cpu.fpscr
+        }
         let sys = cpu.system
         s.sysTickCSR = sys.sysTickCSR
         s.sysTickReload = sys.sysTickReload

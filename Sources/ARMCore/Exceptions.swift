@@ -58,6 +58,10 @@ public final class SystemControl {
     public var mmfar: UInt32 = 0
     public var bfar: UInt32 = 0
     public var cpacr: UInt32 = 0
+    /// FP context control (ASPEN | LSPEN after reset), address and default FPSCR.
+    public var fpccr: UInt32 = 0xC000_0000
+    public var fpcar: UInt32 = 0
+    public var fpdscr: UInt32 = 0
     var resetRequested = false
 
     // SysTick
@@ -91,6 +95,7 @@ public final class SystemControl {
         }
         prigroup = 0; ccr = 1 << 9; scr = 0; faultEnables = 0
         cfsr = 0; hfsr = 0; mmfar = 0; bfar = 0; cpacr = 0
+        fpccr = 0xC000_0000; fpcar = 0; fpdscr = 0
         sysTickCSR = 0; sysTickReload = 0; sysTickCurrent = 0
         resetRequested = false
     }
@@ -227,19 +232,22 @@ extension CPU {
         }
 
         let fromThread = ipsr == 0
-        let excReturn: UInt32 = fromThread ? (usingPSP ? 0xFFFF_FFFD : 0xFFFF_FFF9) : 0xFFFF_FFF1
+        // FP context active: extended frame (S0-S15, FPSCR), EXC_RETURN bit 4 clear.
+        let fpFrame = hasFPU && control & 4 != 0
+        let excReturn: UInt32 = (fromThread ? (usingPSP ? 0xFFFF_FFFD : 0xFFFF_FFF9) : 0xFFFF_FFF1) & (fpFrame ? ~0x10 : ~0)
 
         // Stack frame on the current stack, 8-byte aligned when CCR.STKALIGN is set.
         let sp = r[13]
         let forceAlign = system.ccr & (1 << 9) != 0
         let realign: UInt32 = forceAlign && sp & 4 != 0 ? 1 : 0
-        let frame = (sp &- 0x20) & (forceAlign ? ~7 : ~3)
+        let frame = (sp &- (fpFrame ? 0x68 : 0x20)) & (forceAlign ? ~7 : ~3)
         let stackedPSR = (xpsr & ~(1 << 9)) | (realign << 9)
         let words = [r[0], r[1], r[2], r[3], r[12], r[14], returnAddress & ~1, stackedPSR]
         do {
             for (i, word) in words.enumerated() {
                 try memory.write(frame &+ UInt32(i * 4), size: 4, value: word)
             }
+            if fpFrame { try pushFPContext(frame: frame) }
         } catch {
             throw CPUFault.lockup(pc: returnAddress, reason: String(format: "stacking for %@ failed at SP=0x%08X",
                                                                     ExceptionNumber.name(number), frame))
@@ -249,6 +257,7 @@ extension CPU {
         // Handler mode always uses MSP.
         if usingPSP { swap(&r[13], &bankedSP) }
         control &= ~2
+        if hasFPU { control &= ~4 } // FPCA: the handler starts without FP context
 
         system.pending[number] = false
         system.active[number] = true
@@ -268,6 +277,10 @@ extension CPU {
         }
         let toThread: Bool
         let usePSP: Bool
+        let fpFrame = excReturn & 0x10 == 0
+        guard !fpFrame || hasFPU else {
+            throw CPUFault.lockup(pc: curPC, reason: String(format: "invalid EXC_RETURN 0x%08X", excReturn))
+        }
         switch excReturn & 0xF {
         case 0x1: toThread = false; usePSP = false
         case 0x9: toThread = true; usePSP = false
@@ -282,7 +295,9 @@ extension CPU {
         var words = [UInt32](repeating: 0, count: 8)
         for i in 0..<8 { words[i] = try memory.read(frame &+ UInt32(i * 4), size: 4) }
         let psr = words[7]
-        let newSP = frame &+ 0x20 &+ (psr & (1 << 9) != 0 ? 4 : 0)
+        if fpFrame { try popFPContext(frame: frame) }
+        if hasFPU { if fpFrame { control |= 4 } else { control &= ~4 } }
+        let newSP = frame &+ (fpFrame ? 0x68 : 0x20) &+ (psr & (1 << 9) != 0 ? 4 : 0)
         if usePSP { bankedSP = newSP } else { r[13] = newSP }
 
         r[0] = words[0]; r[1] = words[1]; r[2] = words[2]; r[3] = words[3]
@@ -319,6 +334,8 @@ extension CPU {
             local = ExceptionNumber.usageFault; system.cfsr |= 1 << 24          // UNALIGNED
         case .divideByZero:
             local = ExceptionNumber.usageFault; system.cfsr |= 1 << 25          // DIVBYZERO
+        case .noCoprocessor:
+            local = ExceptionNumber.usageFault; system.cfsr |= 1 << 19          // NOCP
         case .bus(let error, let pc):
             local = ExceptionNumber.busFault
             if error.address == pc || error.address == pc &+ 2 {
@@ -465,6 +482,11 @@ public final class SystemControlSpace: MMIODevice {
         case 0xD34: return s.mmfar
         case 0xD38: return s.bfar
         case 0xD88: return s.cpacr
+        case 0xF34 where cpu.hasFPU: return s.fpccr
+        case 0xF38 where cpu.hasFPU: return s.fpcar
+        case 0xF3C where cpu.hasFPU: return s.fpdscr
+        case 0xF40 where cpu.hasFPU: return 0x1011_0021 // MVFR0: single precision, divide, sqrt
+        case 0xF44 where cpu.hasFPU: return 0x1100_0011 // MVFR1: FZ, DN, half precision, fused MAC
         default: return other[offset] ?? 0
         }
     }
@@ -500,7 +522,10 @@ public final class SystemControlSpace: MMIODevice {
         case 0xD2C: s.hfsr &= ~value
         case 0xD34: s.mmfar = value
         case 0xD38: s.bfar = value
-        case 0xD88: s.cpacr = value
+        case 0xD88: s.cpacr = value & 0x00F0_0000
+        case 0xF34 where cpu.hasFPU: s.fpccr = value & 0xC000_0000 // ASPEN, LSPEN (stacking is eager: LSPACT stays 0)
+        case 0xF38 where cpu.hasFPU: s.fpcar = value & ~7
+        case 0xF3C where cpu.hasFPU: s.fpdscr = value & 0x07C0_0000
         case 0xF00: s.setPending(irq: Int(value & 0x1FF)) // STIR
         default: other[offset] = value
         }

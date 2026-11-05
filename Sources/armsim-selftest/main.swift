@@ -37,13 +37,27 @@ struct Profile {
     let name: String
     let arch: Architecture
     let clangFlags: [String]
+    var fpu = false
 }
 
 let profiles = [
     Profile(name: "M3", arch: .armv7m, clangFlags: ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3"]),
     Profile(name: "M0", arch: .armv6m, clangFlags: ["--target=thumbv6m-none-eabi", "-mcpu=cortex-m0"]),
     Profile(name: "M4", arch: .armv7em, clangFlags: ["--target=thumbv7em-none-eabi", "-mcpu=cortex-m4", "-mfloat-abi=soft"]),
+    Profile(name: "M4F", arch: .armv7em, clangFlags: ["--target=thumbv7em-none-eabi", "-mcpu=cortex-m4", "-mfloat-abi=hard",
+                                                      "-mfpu=fpv4-sp-d16", "-fno-math-errno"], fpu: true),
 ]
+
+/// Simulator for a profile; with an FPU, CP10/CP11 are enabled as SystemInit would.
+func makeSimulator(_ profile: Profile) -> Simulator {
+    let sim = Simulator(arch: profile.arch)
+    if profile.fpu {
+        sim.cpu.hasFPU = true
+        sim.cpu.system.cpacr = 0x00F0_0000
+    }
+    return sim
+}
+
 
 func compile(_ source: String, ext: String, profile: Profile, extraFlags: [String] = []) throws -> [UInt8] {
     let name = UUID().uuidString
@@ -65,9 +79,139 @@ struct AsmTest {
     /// Keys: r0...r12, lr, N Z C V Q, spDelta (SP after minus SP before).
     let expect: [String: UInt32]
     var thumb1Only = false
+    /// Profiles: nil = all with Thumb-2 (M0 too when thumb1Only); "dsp" = M4/M4F; "fpu" = M4F.
+    var only: String?
 }
 
 let asmTests: [AsmTest] = [
+    AsmTest(name: "FPU fixed point, VMLA/VNMLA/VFMS/VFNMS, VDIV, FPSCR IXC", body: """
+        ldr r0, =0xE000ED88
+        ldr r1, =0x00F00000
+        str r1, [r0]
+        vmov.f32 s0, #1.5
+        vcvt.s32.f32 s0, s0, #16
+        vmov r0, s0
+        ldr r1, =0x00030000
+        vmov s1, r1
+        vcvt.f32.s32 s1, s1, #16
+        vmov r2, s1
+        vmov.f32 s2, #2.5
+        vcvt.u16.f32 s2, s2, #8
+        vmov r3, s2
+        vmov.f32 s3, #2.0
+        vmov.f32 s4, #3.0
+        vmov.f32 s5, #10.0
+        vmla.f32 s5, s3, s4
+        vmov r4, s5
+        vmov.f32 s6, #10.0
+        vnmla.f32 s6, s3, s4
+        vmov r5, s6
+        vmov.f32 s7, #10.0
+        vfms.f32 s7, s3, s4
+        vmov r6, s7
+        vmov.f32 s8, #10.0
+        vfnms.f32 s8, s3, s4
+        vmov r7, s8
+        vdiv.f32 s9, s3, s4
+        vmov r8, s9
+        vmrs r9, fpscr
+        and r9, r9, #0x9F
+        """, expect: ["r0": 0x18000, "r2": 0x4040_0000, "r3": 0x280, "r4": 0x4180_0000, "r5": 0xC180_0000,
+                       "r6": 0x4080_0000, "r7": 0xC080_0000, "r8": 0x3F2A_AAAB, "r9": 0x10], only: "fpu"),
+
+    AsmTest(name: "DSP parallel add/sub, SEL, saturation", body: """
+        ldr r0, =0x00030002
+        ldr r1, =0x00010005
+        sadd16 r2, r0, r1
+        ssub16 r3, r0, r1
+        sel r4, r0, r1
+        ldr r6, =0x7FFF8000
+        ldr r7, =0x00018000
+        qadd16 r5, r6, r7
+        uqsub8 r8, r0, r1
+        ldr r9, =0x7FFFFFFF
+        movs r10, #1
+        qadd r11, r9, r10
+        """, expect: ["r2": 0x0004_0007, "r3": 0x0002_FFFD, "r4": 0x0003_0005, "r5": 0x7FFF_8000,
+                       "r8": 0x0002_0000, "r11": 0x7FFF_FFFF, "Q": 1], only: "dsp"),
+
+    AsmTest(name: "DSP multiplies", body: """
+        ldr r0, =0x00030002
+        ldr r1, =0x00050004
+        smulbb r2, r0, r1
+        smultb r3, r0, r1
+        smuad r4, r0, r1
+        smusdx r5, r0, r1
+        smlabb r6, r0, r1, r4
+        mov r8, #0x40000000
+        smmul r7, r8, r8
+        smulwb r10, r8, r1
+        movs r11, #1
+        movs r12, #0
+        smlald r11, r12, r0, r1
+        """, expect: ["r2": 8, "r3": 12, "r4": 23, "r5": 0xFFFF_FFFE, "r6": 31, "r7": 0x1000_0000,
+                       "r10": 0x10000, "r11": 24, "r12": 0], only: "dsp"),
+
+    AsmTest(name: "DSP SSAT16/USAT16/USAD8", body: """
+        ldr r1, =0x7FFF8000
+        ssat16 r0, #8, r1
+        ldr r3, =0x00050020
+        usat16 r2, #4, r3
+        ldr r5, =0x01020304
+        ldr r6, =0x04030201
+        usad8 r4, r5, r6
+        """, expect: ["r0": 0x007F_FF80, "r2": 0x0005_000F, "r4": 8, "Q": 1], only: "dsp"),
+
+    AsmTest(name: "FPU loads/stores, VPUSH/VPOP, VCMP, VCVT, VMOV", body: """
+        ldr r0, =0xE000ED88
+        ldr r1, =0x00F00000
+        str r1, [r0]
+        ldr r0, =0x20010000
+        ldr r1, =0x40490FDB
+        str r1, [r0]
+        vldr s2, [r0]
+        vmov.f32 s3, #0.5
+        vmul.f32 s4, s2, s3
+        vpush {s2-s4}
+        vmov.f32 s2, #1.0
+        vpop {s5-s7}
+        vmov r2, s5
+        vmov r3, s7
+        vcmp.f32 s2, s3
+        vmrs APSR_nzcv, fpscr
+        vcvt.s32.f32 s8, s4
+        vmov r4, s8
+        vmov r5, r6, d2
+        vstr s4, [r0, #8]
+        ldr r7, [r0, #8]
+        """, expect: ["r2": 0x4049_0FDB, "r3": 0x3FC9_0FDB, "r4": 1, "r5": 0x3FC9_0FDB, "r6": 0x4049_0FDB,
+                       "r7": 0x3FC9_0FDB, "N": 0, "Z": 0, "C": 1, "V": 0, "spDelta": 0], only: "fpu"),
+
+    AsmTest(name: "FPU context stacked by an exception (extended frame)", body: """
+        ldr r0, =0xE000ED88
+        ldr r1, =0x00F00000
+        str r1, [r0]
+        ldr r0, =0x20020000
+        ldr r1, =svc_handler
+        str r1, [r0, #44]
+        ldr r2, =0xE000ED08
+        str r0, [r2]
+        vmov.f32 s0, #1.0
+        svc #0
+        vmov r4, s0
+        mrs r5, control
+        b 9f
+        .thumb_func
+        svc_handler:
+        mov r6, lr
+        vmov.f32 s0, #3.0
+        vadd.f32 s1, s0, s0
+        vmov r8, s1
+        mrs r9, control
+        bx lr
+        9:  nop
+        """, expect: ["r4": 0x3F80_0000, "r5": 4, "r6": 0xFFFF_FFE9, "r8": 0x40C0_0000, "r9": 4, "spDelta": 0], only: "fpu"),
+
     AsmTest(name: "subs borrow / negative", body: """
         movs r0, #0
         subs r0, r0, #1
@@ -289,7 +433,7 @@ let asmTests: [AsmTest] = [
         bkpt #0
         .global svc_handler
         .thumb_func
-    svc_handler:
+        svc_handler:
         movs r4, #42
         mov r6, lr
         mrs r9, ipsr
@@ -400,7 +544,7 @@ let asmTests: [AsmTest] = [
         bkpt #0
         .global svc_handler
         .thumb_func
-    svc_handler:
+        svc_handler:
         mov r6, lr
         bx lr
         .balign 128
@@ -439,7 +583,7 @@ func runAsmTest(_ test: AsmTest, profile: Profile) throws -> String? {
         .ltorg
     """
     let object = try compile(source, ext: "s", profile: profile)
-    let sim = Simulator(arch: profile.arch)
+    let sim = makeSimulator(profile)
     let image = try sim.loadELF(object)
     guard let start = image.symbol(named: "_start") else { return "no _start symbol" }
     try sim.prepareCall(address: start.address)
@@ -476,9 +620,116 @@ struct CTest {
     let source: String
     /// Needs hardware divide or 64-bit multiply helpers (no runtime library on Cortex-M0).
     var needsThumb2 = false
+    /// Uses float arithmetic: only run with the FPU (no soft-float library in these tests).
+    var needsFPU = false
 }
 
 let cTests: [CTest] = [
+    CTest(name: "half precision (__fp16) and float/int scaling", source: """
+        u32 test(void) {
+            volatile float v[] = { 1.0f, -2.5f, 0.1f, 65504.0f, 70000.0f, 1e-6f, 3.14159f, -0.0f, 1e-8f };
+            u32 h = 0;
+            for (int i = 0; i < 9; i++) {
+                __fp16 x = v[i];
+                union { __fp16 f; u16 u; } hb; hb.f = x;
+                u16 bits = hb.u;
+                float back = x;
+                union { float f; u32 u; } r; r.f = back;
+                int fixed = (int)(v[i] * 65536.0f);
+                float fromFixed = (float)fixed / 256.0f;
+                union { float f; u32 u; } q; q.f = fromFixed;
+                h = h * 31 + bits; h = h * 31 + r.u; h = h * 31 + (u32)fixed; h = h * 31 + q.u;
+            }
+            return h;
+        }
+        """, needsFPU: true),
+
+    CTest(name: "float arithmetic series", source: """
+        #pragma STDC FP_CONTRACT OFF
+        u32 test(void) {
+            volatile float x = 0.1f;
+            float s = 0.0f, p = 1.0f;
+            for (int i = 1; i < 300; i++) {
+                s += x * (float)i / ((float)i + 1.5f);
+                s -= (float)i * 0.01f;
+                if (s > 50.0f) s = s * 0.5f;
+                if (s < -50.0f) s = -s / 3.0f;
+                p = p * 1.0001f + s * 1e-6f;
+            }
+            union { float f; u32 u; } a, b; a.f = s; b.f = p;
+            return a.u ^ (b.u * 2654435761u);
+        }
+        """, needsFPU: true),
+
+    CTest(name: "float conversions and rounding", source: """
+        u32 test(void) {
+            volatile float values[] = { 0.0f, -0.0f, 1.5f, -1.5f, 2.5f, -2.7f, 123456.789f, -98765.4f, 3e9f,
+                                        -3e9f, 0.49999997f, 16777217.0f, 1e-40f, 4294967040.0f };
+            volatile i32 ints[] = { 0, 1, -1, 16777217, -16777217, 2147483647, -2147483647 - 1, 1234567 };
+            volatile u32 uns[] = { 0u, 1u, 4294967295u, 2147483648u, 16777217u };
+            u32 h = 0;
+            for (int i = 0; i < (int)(sizeof values / sizeof values[0]); i++) {
+                float f = values[i];
+                i32 si = (f > -2147483648.0f && f < 2147483648.0f) ? (i32)f : 0;
+                u32 ui = (f >= 0.0f && f < 4294967296.0f) ? (u32)f : 0;
+                union { float f; u32 u; } v; v.f = f;
+                h = h * 31 + (u32)si; h = h * 31 + ui; h = h * 31 + v.u;
+            }
+            for (int i = 0; i < 8; i++) { union { float f; u32 u; } v; v.f = (float)ints[i]; h = h * 33 + v.u; }
+            for (int i = 0; i < 5; i++) { union { float f; u32 u; } v; v.f = (float)uns[i]; h = h * 37 + v.u; }
+            return h;
+        }
+        """, needsFPU: true),
+
+    CTest(name: "float sqrt, fma, abs, compare, inf/NaN", source: """
+        u32 test(void) {
+            volatile float zero = 0.0f, one = 1.0f, big = 3e38f, tiny = 1e-38f;
+            float inf = one / zero, nan = zero / zero;
+            u32 h = 0, count = 0;
+            float v[] = { 2.0f, 0.25f, 10.0f, 1e-20f, 7.5f, 123.456f };
+            for (int i = 0; i < 6; i++) {
+                union { float f; u32 u; } r;
+                r.f = __builtin_sqrtf(v[i]); h = h * 31 + r.u;
+                r.f = __builtin_fmaf(v[i], 1.1f, -v[(i + 1) % 6]); h = h * 31 + r.u;
+                r.f = __builtin_fabsf(-v[i] * 3.0f); h = h * 31 + r.u;
+            }
+            union { float f; u32 u; } r;
+            r.f = big * 10.0f; h = h * 31 + r.u;
+            r.f = tiny * 1e-5f; h = h * 31 + r.u;
+            r.f = -inf; h = h * 31 + r.u;
+            if (nan != nan) count += 1;
+            if (!(nan < one)) count += 2;
+            if (inf > big) count += 4;
+            if (-zero == zero) count += 8;
+            if (one >= one) count += 16;
+            return h ^ count;
+        }
+        """, needsFPU: true),
+
+    CTest(name: "float matrix and polynomial", source: """
+        #pragma STDC FP_CONTRACT OFF
+        u32 test(void) {
+            float a[4][4], b[4][4], c[4][4];
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++) { a[i][j] = (float)(i + 1) / (float)(j + 2); b[i][j] = (float)(i * j) - 1.25f; }
+            for (int k = 0; k < 20; k++) {
+                for (int i = 0; i < 4; i++)
+                    for (int j = 0; j < 4; j++) {
+                        float sum = 0.0f;
+                        for (int m = 0; m < 4; m++) sum += a[i][m] * b[m][j];
+                        c[i][j] = sum;
+                    }
+                for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) a[i][j] = c[i][j] * 0.125f + 0.5f;
+            }
+            float x = 0.3f, poly = 0.0f;
+            for (int i = 0; i < 12; i++) poly = poly * x + (float)(i % 5) - 2.0f;
+            u32 h = 0;
+            for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) { union { float f; u32 u; } r; r.f = a[i][j]; h = h * 31 + r.u; }
+            union { float f; u32 u; } r; r.f = poly;
+            return h ^ r.u;
+        }
+        """, needsFPU: true),
+
     CTest(name: "crc32", source: """
         static u8 buf[256];
         static u32 crc32(const u8 *p, u32 n) {
@@ -627,10 +878,11 @@ func hostResult(_ test: CTest) throws -> UInt32 {
 func runCTest(_ test: CTest, profile: Profile, optimization: String) throws -> String? {
     let expected = try hostResult(test)
     let object = try compile(cPrelude + test.source, ext: "c", profile: profile, extraFlags: [optimization])
-    let sim = Simulator(arch: profile.arch)
+    let sim = makeSimulator(profile)
     let image = try sim.loadELF(object)
     guard let function = image.symbol(named: "test") else { return "no test() symbol" }
     try sim.prepareCall(address: function.address)
+    if profile.fpu { sim.cpu.system.cpacr = 0x00F0_0000 } // reset by prepareCall, as on a real reset
     let reason = sim.cpu.run(maxInstructions: 200_000_000)
     guard sim.isReturnFromCall(reason) else { return "stopped with \(reason)" }
     let actual = sim.cpu.r[0]
@@ -1206,7 +1458,8 @@ func report(_ label: String, _ body: () throws -> String?) {
 
 print("== Assembly tests")
 for test in asmTests {
-    for profile in profiles where profile.arch != .armv6m || test.thumb1Only {
+    for profile in profiles where test.only == "fpu" ? profile.fpu
+        : test.only == "dsp" ? profile.arch == .armv7em : (profile.arch != .armv6m || test.thumb1Only) {
         report("[\(profile.name)] \(test.name)") { try runAsmTest(test, profile: profile) }
     }
 }
@@ -1245,7 +1498,7 @@ report("[M0] encoder vs clang (\(encoderCorpusM0.count) instructions)") { try ru
 
 print("\n== Differential C tests (simulator vs native Mac)")
 for test in cTests {
-    for profile in profiles where profile.arch != .armv6m || !test.needsThumb2 {
+    for profile in profiles where (profile.arch != .armv6m || !test.needsThumb2) && (profile.fpu || !test.needsFPU) {
         for optimization in ["-O0", "-O2", "-Os"] {
             report("[\(profile.name) \(optimization)] \(test.name)") {
                 try runCTest(test, profile: profile, optimization: optimization)

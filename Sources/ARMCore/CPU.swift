@@ -5,7 +5,7 @@ public enum Architecture: String, CaseIterable, Sendable {
     case armv6m
     /// Cortex-M3: full Thumb-2.
     case armv7m
-    /// Cortex-M4 / M7: Thumb-2 plus DSP extension (DSP ops partially implemented).
+    /// Cortex-M4 / M7: Thumb-2 plus DSP extension (FPv4-SP FPU when `CPU.hasFPU`).
     case armv7em
 
     public var hasThumb2: Bool { self != .armv6m }
@@ -18,6 +18,8 @@ public enum CPUFault: Error, CustomStringConvertible, Equatable {
     case unaligned(pc: UInt32, address: UInt32)
     case unsupported(pc: UInt32, opcode: UInt32, feature: String)
     case divideByZero(pc: UInt32)
+    /// FPU instruction while CPACR denies access (or no FPU).
+    case noCoprocessor(pc: UInt32)
     /// The core cannot continue (fault inside HardFault, missing vector, ...).
     case lockup(pc: UInt32, reason: String)
 
@@ -35,6 +37,8 @@ public enum CPUFault: Error, CustomStringConvertible, Equatable {
             return String(format: "not implemented yet: %@ (opcode 0x%X at 0x%08X)", feature, op, pc)
         case .divideByZero(let pc):
             return String(format: "divide by zero at 0x%08X", pc)
+        case .noCoprocessor(let pc):
+            return String(format: "NOCP: floating-point instruction with the FPU disabled (CPACR) at 0x%08X", pc)
         case .lockup(let pc, let reason):
             return String(format: "LOCKUP at 0x%08X: %@", pc, reason)
         }
@@ -83,6 +87,10 @@ public final class CPU {
     public var n = false, z = false, c = false, v = false, q = false
     /// APSR.GE[3:0] (DSP extension).
     public var ge: UInt32 = 0
+    /// Single-precision FPU (Cortex-M4F): S0-S31 (D0-D15 as pairs) and FPSCR.
+    public var hasFPU = false
+    public var fpRegs = [UInt32](repeating: 0, count: 32)
+    public var fpscr: UInt32 = 0
     /// EPSR IT[7:0]
     public var itState: UInt8 = 0
     public var ipsr: UInt32 = 0
@@ -218,6 +226,8 @@ public final class CPU {
         n = false; z = false; c = false; v = false; q = false
         ge = 0; itState = 0; ipsr = 0
         primask = false; faultmask = false; basepri = 0; control = 0
+        for i in 0..<32 { fpRegs[i] = 0 }
+        fpscr = 0
         bankedSP = 0
         exclusiveMonitor = false
         sleeping = false
@@ -373,6 +383,8 @@ public final class CPU {
             throw CPUFault.invalidState(pc: curPC, target: e.target)
         } catch is DivideByZero {
             throw CPUFault.divideByZero(pc: curPC)
+        } catch is NoCoprocessor {
+            throw CPUFault.noCoprocessor(pc: curPC)
         }
 
         if inIT && !isITInstruction { advanceIT() }
@@ -556,7 +568,7 @@ public final class CPU {
         case 19: faultmask = value & 1 != 0
         case 20:
             let wasPSP = usingPSP
-            control = value & 3
+            control = value & (hasFPU ? 7 : 3)
             if usingPSP != wasPSP { swap(&r[13], &bankedSP) }
         default: throw UndefinedInstruction()
         }

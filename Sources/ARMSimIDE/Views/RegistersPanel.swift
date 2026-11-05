@@ -52,6 +52,30 @@ struct RegistersPanel: View {
                         valueRow("FAULTMASK", s.faultmask ? "1" : "0", changed: s.faultmask != p.faultmask, level: 1)
                         valueRow("CONTROL", String(format: "0x%02X", s.control), changed: s.control != p.control, level: 1)
                     }
+                    if s.hasFPU {
+                        group("FPU") {
+                            ForEach(0..<32, id: \.self) { i in
+                                valueRow("S\(i)", String(format: "%@  (%g)", hex(s.fp[i]), Float(bitPattern: s.fp[i])),
+                                         changed: p.hasFPU && s.fp[i] != p.fp[i], level: 1)
+                            }
+                            group("FPSCR", level: 1, value: hex(s.fpscr), changed: s.fpscr != p.fpscr) {
+                                flagRow("N", s.fpscr >> 31 & 1, p.fpscr >> 31 & 1)
+                                flagRow("Z", s.fpscr >> 30 & 1, p.fpscr >> 30 & 1)
+                                flagRow("C", s.fpscr >> 29 & 1, p.fpscr >> 29 & 1)
+                                flagRow("V", s.fpscr >> 28 & 1, p.fpscr >> 28 & 1)
+                                flagRow("AHP", s.fpscr >> 26 & 1, p.fpscr >> 26 & 1)
+                                flagRow("DN", s.fpscr >> 25 & 1, p.fpscr >> 25 & 1)
+                                flagRow("FZ", s.fpscr >> 24 & 1, p.fpscr >> 24 & 1)
+                                flagRow("RMode", s.fpscr >> 22 & 3, p.fpscr >> 22 & 3)
+                                flagRow("IDC", s.fpscr >> 7 & 1, p.fpscr >> 7 & 1)
+                                flagRow("IXC", s.fpscr >> 4 & 1, p.fpscr >> 4 & 1)
+                                flagRow("UFC", s.fpscr >> 3 & 1, p.fpscr >> 3 & 1)
+                                flagRow("OFC", s.fpscr >> 2 & 1, p.fpscr >> 2 & 1)
+                                flagRow("DZC", s.fpscr >> 1 & 1, p.fpscr >> 1 & 1)
+                                flagRow("IOC", s.fpscr & 1, p.fpscr & 1)
+                            }
+                        }
+                    }
                     group("Internal") {
                         valueRow("Mode", s.ipsr == 0 ? "Thread" : "Handler", changed: false, level: 1)
                         valueRow("Privilege", s.control & 1 != 0 && s.ipsr == 0 ? "Unprivileged" : "Privileged", changed: false, level: 1)

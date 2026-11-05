@@ -247,6 +247,10 @@ final class Workspace: ObservableObject {
             // Keep the memory layout configured in the µVision project.
             (options.romBase, options.romSize, options.ramBase, options.ramSize, options.ram2, options.xtalMHz) = memory
         }
+        // Floating Point Hardware: 2 = single precision (1 = not used).
+        if let vp = Int(text(".//TargetArmAds/ArmAdsMisc/RvdsVP") ?? ""), DeviceInfo.forTarget(options).hasFPU {
+            options.useFPU = vp >= 2
+        }
         options.defines = text(".//Cads/VariousControls/Define") ?? ""
         options.asmDefines = text(".//Aads/VariousControls/Define") ?? ""
         options.includePaths = (text(".//Cads/VariousControls/IncludePath") ?? "").replacingOccurrences(of: "\\", with: "/")

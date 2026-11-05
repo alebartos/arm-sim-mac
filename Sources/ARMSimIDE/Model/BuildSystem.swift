@@ -96,7 +96,9 @@ final class BuildSystem {
             log(LogLine(text: "\(rebuild ? "Rebuild" : "Build") target '\(project.targetName)'"))
         }
 
-        let commonFlags = device.clangTarget + ["-mthumb", "-g"]
+        let useFPU = project.options.useFPU == true && device.hasFPU
+        let targetFlags = device.clangTarget(fpu: useFPU)
+        let commonFlags = targetFlags + ["-mthumb", "-g"]
         let cFlags = commonFlags + ["-fno-color-diagnostics", "-fno-caret-diagnostics", project.options.optimization, "-ffreestanding", "-fno-common",
                                     "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-fno-exceptions",
                                     "-std=" + (project.options.cStandard ?? "gnu11"), "-Wno-nonportable-include-path",
@@ -195,16 +197,22 @@ final class BuildSystem {
 
         // Runtime support library (weak symbols; user code can override them). Only for C code.
         let hasC = project.groups.flatMap(\.files).contains { SourceKind(url: URL(fileURLWithPath: $0)) == .c }
-        let runtimeObject = objectsDir.appendingPathComponent("armsim_rt.o")
-        if hasC && (forceAll || !FileManager.default.fileExists(atPath: runtimeObject.path)) {
-            let runtimeSource = objectsDir.appendingPathComponent("armsim_rt.c")
+        let runtimeName = useFPU ? "armsim_rt_hf.o" : "armsim_rt.o" // one per float ABI
+        let runtimeObject = objectsDir.appendingPathComponent(runtimeName)
+        let runtimeSource = objectsDir.appendingPathComponent("armsim_rt.c")
+        // Rebuilt when missing, on Rebuild, or when this ARM Sim version ships a different library.
+        let runtimeChanged = (try? String(contentsOf: runtimeSource, encoding: .utf8)) != RuntimeLibrary.source
+        if runtimeChanged { // the object of the other float ABI is stale too
+            for name in ["armsim_rt.o", "armsim_rt_hf.o"] { try? FileManager.default.removeItem(at: objectsDir.appendingPathComponent(name)) }
+        }
+        if hasC && (forceAll || runtimeChanged || !FileManager.default.fileExists(atPath: runtimeObject.path)) {
             try? RuntimeLibrary.source.write(to: runtimeSource, atomically: true, encoding: .utf8)
-            runCompiler(["clang"] + device.clangTarget + ["-mthumb", "-O2", "-ffreestanding", "-fno-builtin",
+            runCompiler(["clang"] + targetFlags + ["-mthumb", "-O2", "-ffreestanding", "-fno-builtin",
                                                           "-ffunction-sections", "-fdata-sections",
                                                           "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
                                                           "-c", runtimeSource.path, "-o", runtimeObject.path])
         }
-        if hasC { objects.append(("armsim_rt.o", runtimeObject, nil)) }
+        if hasC { objects.append((runtimeName, runtimeObject, nil)) }
 
         guard errors == 0 else {
             finish(start: start, name: project.options.outputName)

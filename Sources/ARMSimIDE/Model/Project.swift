@@ -24,6 +24,14 @@ struct DeviceInfo: Identifiable, Hashable {
         }
     }
 
+    /// clang target flags; with `fpu` a Cortex-M4 uses the FPv4-SP hardware (hard-float ABI as µVision's AC6).
+    func clangTarget(fpu: Bool) -> [String] {
+        guard fpu, core == "Cortex-M4" else { return clangTarget }
+        return clangTarget.filter { $0 != "-mfloat-abi=soft" } + ["-mfloat-abi=hard", "-mfpu=fpv4-sp-d16"]
+    }
+
+    var hasFPU: Bool { core == "Cortex-M4" }
+
     var clangTarget: [String] {
         switch core {
         case "Cortex-M0": return ["--target=thumbv6m-none-eabi", "-mcpu=cortex-m0"]
@@ -46,7 +54,7 @@ struct DeviceInfo: Identifiable, Hashable {
                    summary: "Generic ARM Cortex-M3 device (ARMv7-M)."),
         DeviceInfo(name: "ARMCM4", vendor: "ARM", core: "Cortex-M4", romBase: 0x0000_0000, romSize: 0x0004_0000,
                    ramBase: 0x2000_0000, ramSize: 0x0002_0000, clockMHz: 12,
-                   summary: "Generic ARM Cortex-M4 device (ARMv7E-M). FPU not simulated yet: soft-float."),
+                   summary: "Generic ARM Cortex-M4 device (ARMv7E-M), FPv4-SP floating-point unit."),
         DeviceInfo(name: "LPC1768", vendor: "NXP", core: "Cortex-M3", romBase: 0x0000_0000, romSize: 0x0008_0000,
                    ramBase: 0x1000_0000, ramSize: 0x0000_8000, clockMHz: 100,
                    summary: "NXP LPC1768, 512 KB flash, 32 KB local SRAM. Core and memory only."),
@@ -117,6 +125,8 @@ struct TargetOptions: Codable, Equatable {
     var svdPath: String?
     var packID: String?
     var runToMain = true
+    /// µVision "Floating Point Hardware: Use Single Precision" (Cortex-M4F); nil = not used.
+    var useFPU: Bool?
     /// Debug "Initialization File" (.ini) of the simulator, relative to the project (from the .uvoptx).
     var debugIniFile: String?
     var stopOnFault = false
@@ -133,6 +143,7 @@ struct TargetOptions: Codable, Equatable {
             packID = "\(p.packID).\(p.packVersion)"
             svdPath = p.svdPath.flatMap { $0.hasPrefix("/") ? $0 : nil }
             ram2 = p.ram2.map { String(format: "0x%08X:0x%X", $0.base, $0.size) }
+            useFPU = p.deviceInfo.hasFPU && !["", "0", "NO_FPU"].contains(p.fpu)
         }
     }
 

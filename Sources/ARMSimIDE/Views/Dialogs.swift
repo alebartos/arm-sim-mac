@@ -138,6 +138,16 @@ struct OptionsDialog: View {
                 Text("Xtal (MHz):")
                 TextField("", text: $xtal).frame(width: 70).textFieldStyle(.roundedBorder)
             }
+            if device.hasFPU {
+                HStack {
+                    Text("Floating Point Hardware:")
+                    Picker("", selection: Binding(get: { options.useFPU == true }, set: { options.useFPU = $0 })) {
+                        Text("Not Used").tag(false)
+                        Text("Use Single Precision").tag(true)
+                    }
+                    .labelsHidden().frame(width: 180)
+                }
+            }
             HStack(alignment: .top, spacing: 16) {
                 GroupBox("Read/Only Memory Areas") {
                     memoryGrid(name: "IROM1", base: $romBase, size: $romSize, startup: true)
