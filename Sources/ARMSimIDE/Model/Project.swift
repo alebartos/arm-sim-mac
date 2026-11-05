@@ -109,12 +109,16 @@ struct TargetOptions: Codable, Equatable {
     var ram2: String?
     /// Build output folder relative to the project ("Objects" when nil).
     var outputDirectory: String?
+    /// µVision's own output folder of an imported project (where Keil's .axf is), relative.
+    var keilOutputDirectory: String?
     /// Device description from a pack: vendor, core and SVD file (absolute path).
     var vendor: String?
     var core: String?
     var svdPath: String?
     var packID: String?
     var runToMain = true
+    /// Debug "Initialization File" (.ini) of the simulator, relative to the project (from the .uvoptx).
+    var debugIniFile: String?
     var stopOnFault = false
     var periodicUpdate = true
 

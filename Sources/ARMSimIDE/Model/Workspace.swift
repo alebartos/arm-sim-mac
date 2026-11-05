@@ -130,6 +130,7 @@ final class Workspace: ObservableObject {
 
     func closeProject() {
         saveAll()
+        saveUVOptions()
         project = nil
         projectURL = nil
         uvDocument = nil
@@ -166,6 +167,11 @@ final class Workspace: ObservableObject {
     @Published private(set) var uvTargets: [String] = []
     @Published private(set) var uvTargetIndex = 0
 
+    /// The µVision options file (.uvoptx: breakpoints, watch and memory windows, debug settings).
+    private var uvOptionsDocument: XMLDocument?
+    /// What was loaded from it, to write it back only when the user changed something.
+    private var uvOptionsLoaded: (breakpoints: Set<SourceBreakpoint>, watch: [String], watch2: [String], memory: String?)?
+
     private func uvTargetNode(_ index: Int) -> XMLElement? {
         (try? uvDocument?.nodes(forXPath: "/Project/Targets/Target"))?.compactMap { $0 as? XMLElement }[safe: index]
     }
@@ -181,6 +187,7 @@ final class Workspace: ObservableObject {
         let saved = UserDefaults.standard.integer(forKey: "uvTarget:" + url.path)
         loadUVTarget(saved < uvTargets.count ? saved : 0, url: url)
         didOpen(url)
+        loadUVOptions()
         let armasm = (project?.groups.flatMap(\.files) ?? []).filter { file in
             guard let dir = projectDirectory, SourceKind(url: URL(fileURLWithPath: file)) == .asm,
                   let text = try? String(contentsOf: dir.appendingPathComponent(file), encoding: .utf8) else { return false }
@@ -195,7 +202,9 @@ final class Workspace: ObservableObject {
     func selectUVTarget(_ index: Int) {
         guard let url = projectURL, uvDocument != nil, index != uvTargetIndex, index < uvTargets.count else { return }
         saveProject()
+        saveUVOptions()
         loadUVTarget(index, url: url)
+        loadUVOptions()
         UserDefaults.standard.set(index, forKey: "uvTarget:" + url.path)
         lastProduct = nil
     }
@@ -247,6 +256,8 @@ final class Workspace: ObservableObject {
         let levels = ["", "-O0", "-O1", "-O2", "-O3", "-Ofast", "-Os", "-Oz", "-Oz"]
         if let index = Int(text(".//Cads/Optim") ?? ""), index > 0, index < levels.count { options.optimization = levels[index] }
         // Keep Keil's own Objects/ folder untouched.
+        options.keilOutputDirectory = (text(".//TargetCommonOption/OutputDirectory") ?? "")
+            .replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "./ "))
         options.outputDirectory = "ARMSim_Objects"
 
         var groups: [SourceGroup] = []
@@ -487,6 +498,37 @@ final class Workspace: ObservableObject {
         }
     }
 
+    /// The .axf µVision built for the active target, if there is one.
+    var keilImageURL: URL? {
+        guard let project, let dir = projectDirectory, let folder = project.options.keilOutputDirectory else { return nil }
+        let url = dir.appendingPathComponent(folder.isEmpty ? "." : folder)
+            .appendingPathComponent(project.options.outputName + ".axf").standardizedFileURL
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Debug ▸ Start Debug Session with Keil Image: load µVision's .axf without building.
+    func startDebugWithKeilImage() {
+        guard mode == .edit, let project, let dir = projectDirectory, let axf = keilImageURL, !isBuilding else { NSSound.beep(); return }
+        saveAll()
+        buildLog = []
+        isBuilding = true
+        buildQueue.async {
+            let system = BuildSystem { line in DispatchQueue.main.async { self.buildLog.append(line) } }
+            let product = system.loadImage(axf: axf, project: project, projectDir: dir)
+            DispatchQueue.main.async {
+                self.isBuilding = false
+                self.lastProduct = product
+                guard let product else {
+                    NSAlert.show("Cannot start debug session", "\(axf.lastPathComponent) could not be loaded.")
+                    return
+                }
+                self.mode = .debug
+                self.debugger.start(product: product, breakpoints: self.resolvedBreakpointAddresses())
+                SystemViewerState.shared.load(svdURL: self.svdURL())
+            }
+        }
+    }
+
     /// SVD file for the current target (from its pack), used by the System Viewer.
     func svdURL() -> URL? {
         guard let options = project?.options else { return nil }
@@ -502,6 +544,189 @@ final class Workspace: ObservableObject {
             saveProject()
         }
         return url
+    }
+
+    // MARK: µVision options (.uvoptx)
+
+    private var uvOptionsURL: URL? {
+        projectURL.map { $0.deletingPathExtension().appendingPathExtension("uvoptx") }
+    }
+
+    private func uvOptionsTarget() -> XMLElement? {
+        guard let xml = uvOptionsDocument, let name = uvTargets[safe: uvTargetIndex] else { return nil }
+        return ((try? xml.nodes(forXPath: "/ProjectOpt/Target")) ?? []).compactMap { $0 as? XMLElement }
+            .first { ($0.elements(forName: "TargetName").first?.stringValue ?? "") == name }
+    }
+
+    /// Breakpoints, Watch 1/2, Memory 1, "Run to main()" and the debug initialization file of the
+    /// active target, as µVision saved them.
+    func loadUVOptions() {
+        uvOptionsDocument = nil
+        uvOptionsLoaded = nil
+        guard let url = uvOptionsURL, let dir = projectDirectory,
+              let xml = try? XMLDocument(contentsOf: url, options: [.nodePreserveAll]) else { return }
+        uvOptionsDocument = xml
+        guard let target = uvOptionsTarget() else { return }
+        func text(_ path: String, in node: XMLNode) -> String? {
+            (try? node.nodes(forXPath: path))?.first?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var loaded = Set<SourceBreakpoint>()
+        for bp in (try? target.nodes(forXPath: "TargetOption/Breakpoint/Bp")) ?? [] {
+            guard text("Type", in: bp) == "0", text("EnabledFlag", in: bp) != "0",
+                  let file = text("Filename", in: bp), !file.isEmpty,
+                  let line = Int(text("LineNumber", in: bp) ?? "") else { continue }
+            let path = canonicalPath(dir.appendingPathComponent(file.replacingOccurrences(of: "\\", with: "/")).path)
+            loaded.insert(SourceBreakpoint(path: path, line: line))
+        }
+        breakpoints = loaded
+        var watch: [String] = [], watch2: [String] = []
+        for window in ["WatchWindow1", "WatchWindow2"] {
+            for item in (try? target.nodes(forXPath: "TargetOption/\(window)/Ww/ItemText")) ?? [] {
+                if let e = item.stringValue?.trimmingCharacters(in: .whitespaces), !e.isEmpty, !watch.contains(e) {
+                    watch.append(e)
+                    if window == "WatchWindow2" { watch2.append(e) }
+                }
+            }
+        }
+        debugger.watchExpressions = watch
+        let memory = text("TargetOption/MemoryWindow1/Mm/ItemText", in: target)
+        if let memory, !memory.isEmpty { UserDefaults.standard.set(memory, forKey: "memoryAddress") }
+        uvOptionsLoaded = (loaded, watch, watch2, memory)
+        if var project {
+            if let goMain = text("TargetOption/DebugOpt/sGomain", in: target) { project.options.runToMain = goMain != "0" }
+            let ini = text("TargetOption/DebugOpt/sIfile", in: target) ?? ""
+            project.options.debugIniFile = ini.isEmpty ? nil : ini.replacingOccurrences(of: "\\", with: "/")
+            self.project = project
+        }
+    }
+
+    /// Write breakpoints / watch / memory back into the .uvoptx, only when they changed.
+    func saveUVOptions() {
+        guard let xml = uvOptionsDocument, let url = uvOptionsURL, let loaded = uvOptionsLoaded,
+              let target = uvOptionsTarget(), let dir = projectDirectory,
+              let option = target.elements(forName: "TargetOption").first else { return }
+        let memory = UserDefaults.standard.string(forKey: "memoryAddress")
+        let watch = debugger.watchExpressions
+        guard loaded.breakpoints != breakpoints || loaded.watch != watch || (loaded.memory != nil && loaded.memory != memory)
+        else { return }
+        func element(_ name: String, _ value: String) -> XMLElement { XMLElement(name: name, stringValue: value) }
+        // µVision layout: two spaces per level, TargetOption children at depth 6.
+        func indent(_ e: XMLElement, depth: Int) {
+            let children = (e.children ?? []).compactMap { $0 as? XMLElement }
+            guard !children.isEmpty, !(e.children ?? []).contains(where: { $0.kind == .text }) else { return }
+            e.setChildren(nil)
+            for child in children {
+                e.addChild(XMLNode.text(withStringValue: "\n" + String(repeating: " ", count: depth + 2)) as! XMLNode)
+                indent(child, depth: depth + 2)
+                e.addChild(child)
+            }
+            e.addChild(XMLNode.text(withStringValue: "\n" + String(repeating: " ", count: depth)) as! XMLNode)
+        }
+        func replace(_ name: String, with node: XMLElement?, after previous: [String]) {
+            var at: Int
+            if let old = option.elements(forName: name).first {
+                at = old.index
+                option.removeChild(at: at)
+                if at > 0, option.child(at: at - 1)?.kind == .text { at -= 1; option.removeChild(at: at) }
+            } else {
+                // Keep µVision's element order: insert after the last present predecessor.
+                let anchor = previous.compactMap { option.elements(forName: $0).first }.map(\.index).max()
+                at = (anchor ?? (option.childCount - 2)) + 1
+            }
+            guard let node else { return }
+            indent(node, depth: 6)
+            option.insertChild(node, at: at)
+            option.insertChild(XMLNode.text(withStringValue: "\n      ") as! XMLNode, at: at)
+        }
+        // Breakpoints: keep µVision's own <Bp> entries for those still set, append new ones.
+        let base = canonicalPath(dir.path) + "/"
+        let module = String((project?.options.outputName ?? "project").map { $0.isLetter || $0.isNumber ? $0 : "_" })
+        func key(_ bp: XMLNode) -> SourceBreakpoint? {
+            func value(_ n: String) -> String? { (try? bp.nodes(forXPath: n))?.first?.stringValue }
+            guard value("Type") == "0", let file = value("Filename"), let line = Int(value("LineNumber") ?? "") else { return nil }
+            return SourceBreakpoint(path: canonicalPath(dir.appendingPathComponent(file.replacingOccurrences(of: "\\", with: "/")).path),
+                                    line: line)
+        }
+        if loaded.breakpoints != breakpoints {
+            let existing = option.elements(forName: "Breakpoint").first
+            var present = Set<SourceBreakpoint>()
+            // Remove µVision entries the user cleared (with the whitespace before them); keep the rest as is.
+            for bp in existing?.elements(forName: "Bp") ?? [] {
+                guard let k = key(bp) else { continue }
+                if breakpoints.contains(k) { present.insert(k); continue }
+                let i = bp.index
+                existing?.removeChild(at: i)
+                if i > 0, existing?.child(at: i - 1)?.kind == .text { existing?.removeChild(at: i - 1) }
+            }
+            var added: [XMLElement] = []
+            for bp in breakpoints.subtracting(present).sorted(by: { ($0.path, $0.line) < ($1.path, $1.line) }) {
+                let relative = bp.path.hasPrefix(base) ? String(bp.path.dropFirst(base.count)) : bp.path
+                let address = lastProduct?.debugInfo.firstAddress(for: SourceLocation(path: bp.path, line: bp.line)) ?? 0
+                let node = XMLElement(name: "Bp")
+                for child in [element("Number", "0"), element("Type", "0"), element("LineNumber", "\(bp.line)"),
+                              element("EnabledFlag", "1"), element("Address", "\(address)"), element("ByteObject", "0"),
+                              element("HtxType", "0"), element("ManyObjects", "0"), element("SizeOfObject", "0"),
+                              element("BreakByAccess", "0"), element("BreakIfRCount", "1"),
+                              element("Filename", ".\\" + relative.replacingOccurrences(of: "/", with: "\\")),
+                              element("ExecCommand", ""),
+                              element("Expression", "\\\\\(module)\\\(relative)\\\(bp.line)")] {
+                    node.addChild(child)
+                }
+                indent(node, depth: 8)
+                added.append(node)
+            }
+            if let existing {
+                // Before the closing whitespace of <Breakpoint>.
+                var at = existing.childCount
+                if at > 0, existing.child(at: at - 1)?.kind == .text { at -= 1 }
+                for node in added {
+                    existing.insertChild(XMLNode.text(withStringValue: "\n        ") as! XMLNode, at: at)
+                    existing.insertChild(node, at: at + 1)
+                    at += 2
+                }
+                let all = existing.elements(forName: "Bp")
+                for (number, bp) in all.enumerated() { bp.elements(forName: "Number").first?.stringValue = "\(number)" }
+                if all.isEmpty { replace("Breakpoint", with: nil, after: []) }
+            } else if !added.isEmpty {
+                let list = XMLElement(name: "Breakpoint")
+                for (number, node) in added.enumerated() {
+                    node.elements(forName: "Number").first?.stringValue = "\(number)"
+                    list.addChild(node)
+                }
+                replace("Breakpoint", with: list, after: ["TargetDriverDllRegistry", "DebugOpt"])
+            }
+        }
+        func watchNode(_ number: Int, _ items: [String]) -> XMLElement? {
+            guard !items.isEmpty else { return nil }
+            let w = XMLElement(name: "WatchWindow\(number)")
+            for (count, e) in items.enumerated() {
+                let item = XMLElement(name: "Ww")
+                item.addChild(element("count", "\(count)")); item.addChild(element("WinNumber", "\(number)"))
+                item.addChild(element("ItemText", e))
+                w.addChild(item)
+            }
+            return w
+        }
+        let window2 = watch.filter { loaded.watch2.contains($0) }
+        replace("WatchWindow1", with: watchNode(1, watch.filter { !loaded.watch2.contains($0) }),
+                after: ["Breakpoint", "TargetDriverDllRegistry", "DebugOpt"])
+        replace("WatchWindow2", with: watchNode(2, window2), after: ["WatchWindow1", "Breakpoint", "TargetDriverDllRegistry", "DebugOpt"])
+        if let memory, loaded.memory != nil || !memory.isEmpty,
+           let item = (try? option.nodes(forXPath: "MemoryWindow1/Mm/ItemText"))?.first {
+            item.stringValue = memory
+        }
+        // Same text as µVision writes: its XML declaration and <a></a> for empty elements.
+        var text = xml.xmlString(options: [.nodePreserveAll])
+        if let empty = try? NSRegularExpression(pattern: #"<([A-Za-z_][\w.-]*)/>"#) {
+            text = empty.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "<$1></$1>")
+        }
+        if let original = try? String(contentsOf: url, encoding: .utf8), let firstLine = original.components(separatedBy: "\n").first,
+           firstLine.hasPrefix("<?xml"), let end = text.range(of: "?>") {
+            text = firstLine.trimmingCharacters(in: .newlines) + "\n" + text[end.upperBound...].drop { $0 == "\n" || $0 == "\r" }
+        }
+        if !text.hasSuffix("\n") { text += "\n" }
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        uvOptionsLoaded = (breakpoints, watch, window2, memory)
     }
 
     // MARK: Breakpoints

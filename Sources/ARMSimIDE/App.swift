@@ -119,6 +119,8 @@ struct AppCommands: Commands {
 
         CommandMenu("Debug") {
             Button("Start/Stop Debug Session") { ws.toggleDebugSession() }.keyboardShortcut(functionKey(5), modifiers: [.command])
+            Button("Start Debug Session with Keil Image") { ws.startDebugWithKeilImage() }
+                .disabled(ws.mode == .debug || ws.keilImageURL == nil)
             Button("Reset CPU") { ws.debugger.reset() }
             Button("Run") { ws.debugger.run() }.keyboardShortcut(functionKey(5), modifiers: [])
             Button("Stop") { ws.debugger.stop() }
@@ -335,10 +337,21 @@ extension SmokeTest {
         ws.open(projectURL: url)
         say("targets: \(ws.uvTargets), active \(ws.uvTargetIndex)")
         say("imported: \(ws.project.map { "\($0.name), device \($0.options.device), groups \($0.groups.map(\.name)), files \($0.groups.flatMap(\.files))" } ?? "nil")")
-        ws.toggleDebugSession()
+        let useKeil = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_KEIL"] != nil
+        say("keil image: \(ws.keilImageURL?.path ?? "none")")
+        say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
+        if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }
         var steps = 0
+        var waits = 0
         func stepLoop() {
-            guard !d.isRunning else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: stepLoop); return }
+            if d.isRunning {
+                // A step that never ends (e.g. "B ." stepping onto itself): stop it like the user would.
+                waits += 1
+                if waits > 20 { d.stop(); waits = 0 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: stepLoop)
+                return
+            }
+            waits = 0
             let loc = d.currentLocation.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" } ?? "-"
             say(String(format: "PC=0x%08X R0=0x%08X SP=0x%08X IPSR=%d  %@", d.snapshot.r[15], d.snapshot.r[0], d.snapshot.r[13], d.snapshot.ipsr, loc))
             steps += 1
@@ -361,6 +374,14 @@ extension SmokeTest {
                    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                     view.cacheDisplay(in: view.bounds, to: rep)
                     try? rep.representation(using: .png, properties: [:])?.write(to: url.deletingLastPathComponent().appendingPathComponent("screenshot.png"))
+                }
+                if let spec = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_TOGGLE"],
+                   let colon = spec.lastIndex(of: ":"), let line = Int(spec[spec.index(after: colon)...]),
+                   let dir = ws.projectDirectory {
+                    // Toggle a breakpoint and add a watch, then close: exercises the .uvoptx write-back.
+                    ws.toggleBreakpoint(path: canonicalPath(dir.appendingPathComponent(String(spec[..<colon])).path), line: line)
+                    d.watchExpressions.append("SystemCoreClock")
+                    ws.closeProject()
                 }
                 NSApp.terminate(nil)
                 return

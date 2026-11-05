@@ -99,7 +99,9 @@ final class BuildSystem {
         let commonFlags = device.clangTarget + ["-mthumb", "-g"]
         let cFlags = commonFlags + ["-fno-color-diagnostics", "-fno-caret-diagnostics", project.options.optimization, "-ffreestanding", "-fno-common",
                                     "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-fno-exceptions",
-                                    "-std=" + (project.options.cStandard ?? "gnu11"), "-Wno-nonportable-include-path"]
+                                    "-std=" + (project.options.cStandard ?? "gnu11"), "-Wno-nonportable-include-path",
+                                    // Same as µVision's Arm Compiler 6 command line.
+                                    "-funsigned-char", "-fshort-enums", "-fshort-wchar"]
             + project.options.defines.split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" }).map { "-D\($0)" }
             + project.options.includePaths.split(separator: ";").map {
                 "-I" + projectDir.appendingPathComponent(String($0).trimmingCharacters(in: .whitespaces)).path
@@ -249,6 +251,20 @@ final class BuildSystem {
 
     static func looksLikeArmasm(_ text: String) -> Bool { ArmasmTranslator.looksLikeArmasm(text) }
 
+    /// Debug an image built by µVision (Objects/<name>.axf) as it is, without rebuilding.
+    func loadImage(axf: URL, project: ProjectFile, projectDir: URL) -> BuildProduct? {
+        let device = DeviceInfo.forTarget(project.options)
+        log(LogLine(text: "Load \"\(axf.path.hasPrefix(projectDir.path + "/") ? String(axf.path.dropFirst(projectDir.path.count + 1)) : axf.path)\""))
+        guard let data = try? Data(contentsOf: axf), let image = try? ELFLoader.parse([UInt8](data)) else {
+            log(LogLine(text: "\(axf.lastPathComponent): error: not a readable ELF image", kind: .error))
+            return nil
+        }
+        let debugInfo = DebugInfoBuilder.build(linked: axf, device: device, projectDir: projectDir)
+        let dwarf = DwarfInfo.build(objects: [axf], image: image)
+        log(LogLine(text: "\(debugInfo.addressesByLocation.count) source lines, \(image.symbols.count) symbols"))
+        return BuildProduct(image: image, debugInfo: debugInfo, options: project.options, device: device, axfURL: axf, dwarf: dwarf)
+    }
+
     /// What µVision adds to an Arm Compiler 6 command line: the device header folder from the pack and
     /// its define, the RTE folder of the target, `_RTE_` / `__UVISION_VERSION`, and `__ARMCC_VERSION` so
     /// CMSIS `cmsis_compiler.h` picks `cmsis_armclang.h` (clang understands it). Plus the bundled minimal
@@ -297,9 +313,30 @@ final class BuildSystem {
             return
         }
         for raw in result.output.components(separatedBy: "\n") where !raw.isEmpty {
+            if isMainFallOffWarning(raw) { continue }
             log(parseDiagnostic(raw))
         }
         if result.status != 0 && !result.output.contains("error:") { errors += 1 }
+    }
+
+    /// armclang (like C99) accepts `main` ending without `return` even in C90 mode; clang warns.
+    /// Drop that one warning so the build output matches µVision.
+    private func isMainFallOffWarning(_ line: String) -> Bool {
+        guard line.hasSuffix("[-Wreturn-type]"),
+              let m = line.range(of: #"^(.+?):(\d+):\d+: warning: "#, options: .regularExpression) else { return false }
+        let head = line[m].dropLast(": warning: ".count)
+        let parts = head.split(separator: ":")
+        guard parts.count >= 3, let lineNumber = Int(parts[parts.count - 2]) else { return false }
+        let path = parts.dropLast(2).joined(separator: ":")
+        guard let text = (try? String(contentsOfFile: path, encoding: .utf8))
+                ?? (try? String(contentsOfFile: path, encoding: .isoLatin1)) else { return false }
+        // The function definition the warning belongs to: last line before it starting at column 0 with "(".
+        let lines = text.components(separatedBy: "\n").prefix(lineNumber)
+        guard let header = lines.last(where: { l in
+            guard let first = l.first, first.isLetter || first == "_" else { return false }
+            return l.contains("(")
+        }) else { return false }
+        return header.range(of: #"\bmain\s*\("#, options: .regularExpression) != nil
     }
 
     /// "path/main.c:12:5: error: message" -> "main.c(12): error: message"
@@ -373,7 +410,49 @@ enum DebugInfoBuilder {
             }
         }
 
-        // 2. Disassembly of the linked image (correct addresses and symbol names).
+        disassemble(axf: axf, device: device, into: info)
+        return info
+    }
+
+    /// Debug info for an image linked elsewhere (a Keil-built .axf): line table read from the image
+    /// itself, its source paths (Windows, from the PC that built it) mapped onto the project's files.
+    static func build(linked axf: URL, device: DeviceInfo, projectDir: URL) -> DebugInfo {
+        let info = DebugInfo()
+        var resolved: [String: String?] = [:]
+        func resolve(_ raw: String) -> String? {
+            if let hit = resolved[raw] { return hit }
+            let parts = raw.replacingOccurrences(of: "\\", with: "/").split(separator: "/")
+                .map(String.init).filter { $0 != "." && !$0.isEmpty && !$0.hasSuffix(":") }
+            var result: String?
+            // Longest path suffix that exists in the project folder.
+            for start in parts.indices {
+                let candidate = projectDir.appendingPathComponent(parts[start...].joined(separator: "/"))
+                if FileManager.default.fileExists(atPath: candidate.path) { result = canonicalPath(candidate.path); break }
+            }
+            resolved[raw] = result
+            return result
+        }
+        if let output = try? Shell.run(["xcrun", "llvm-objdump", "-d", "-l", "--no-show-raw-insn", axf.path]).output {
+            var current: SourceLocation?
+            for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+                if line.hasPrefix("; "), let colon = line.lastIndex(of: ":"), let number = Int(line[line.index(after: colon)...]) {
+                    current = resolve(String(line[line.index(line.startIndex, offsetBy: 2)..<colon]))
+                        .map { SourceLocation(path: $0, line: number) }
+                } else if line.hasPrefix("Disassembly of section ") || line.hasSuffix(">:") {
+                    current = nil
+                } else if let location = current, let colon = line.firstIndex(of: ":"),
+                          let address = UInt32(line[..<colon].trimmingCharacters(in: .whitespaces), radix: 16) {
+                    info.lineByAddress[address] = location
+                    info.addressesByLocation[location, default: []].append(address)
+                }
+            }
+        }
+        disassemble(axf: axf, device: device, into: info)
+        return info
+    }
+
+    /// Disassembly of the linked image (correct addresses and symbol names).
+    private static func disassemble(axf: URL, device: DeviceInfo, into info: DebugInfo) {
         let cpu = device.clangTarget.first { $0.hasPrefix("-mcpu=") }.map { String($0.dropFirst(6)) } ?? "cortex-m3"
         let triple = device.clangTarget.first { $0.hasPrefix("--target=") }.map { String($0.dropFirst(9)) } ?? "thumbv7m-none-eabi"
         if let output = try? Shell.run(["xcrun", "llvm-objdump", "-d", "--triple=\(triple)", "--mcpu=\(cpu)", axf.path]).output {
@@ -396,7 +475,6 @@ enum DebugInfoBuilder {
                     operands: operands.trimmingCharacters(in: .whitespaces)))
             }
         }
-        return info
     }
 }
 
