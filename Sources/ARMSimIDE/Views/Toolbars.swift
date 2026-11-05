@@ -67,8 +67,12 @@ struct BuildToolbar: View {
             ToolButton(icon: "arrow.down.to.line.compact", help: "Download (F8): loads the image into the simulator",
                        label: "LOAD", enabled: idle) { workspace.build() }
             ToolbarDivider()
-            Picker("", selection: .constant(workspace.project?.targetName ?? "")) {
-                Text(workspace.project?.targetName ?? "").tag(workspace.project?.targetName ?? "")
+            Picker("", selection: Binding(get: { workspace.uvTargetIndex }, set: { workspace.selectUVTarget($0) })) {
+                if workspace.uvTargets.isEmpty {
+                    Text(workspace.project?.targetName ?? "").tag(0)
+                } else {
+                    ForEach(Array(workspace.uvTargets.enumerated()), id: \.offset) { Text($0.element).tag($0.offset) }
+                }
             }
             .labelsHidden()
             .frame(width: 110)

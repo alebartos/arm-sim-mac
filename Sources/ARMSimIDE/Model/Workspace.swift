@@ -109,7 +109,7 @@ final class Workspace: ObservableObject {
         if mode == .debug { toggleDebugSession() }
         closeProject()
         if url.pathExtension.lowercased() == "uvprojx" {
-            importUVProject(url)
+            openUVProject(url)
             return
         }
         guard let data = try? Data(contentsOf: url),
@@ -118,6 +118,10 @@ final class Workspace: ObservableObject {
             return
         }
         self.project = project
+        didOpen(url)
+    }
+
+    private func didOpen(_ url: URL) {
         projectURL = url
         Bookmarks.shared.projectKey = url.path
         UserDefaults.standard.set(url.path, forKey: "lastProject")
@@ -128,6 +132,8 @@ final class Workspace: ObservableObject {
         saveAll()
         project = nil
         projectURL = nil
+        uvDocument = nil
+        uvTargets = []
         Bookmarks.shared.projectKey = nil
         documents = []
         activeDocumentID = nil
@@ -139,7 +145,11 @@ final class Workspace: ObservableObject {
 
     func saveProject() {
         guard let project, let projectURL else { return }
-        try? JSONEncoder.pretty.encode(project).write(to: projectURL)
+        if uvDocument != nil {
+            saveUVProject(project, to: projectURL)
+        } else {
+            try? JSONEncoder.pretty.encode(project).write(to: projectURL)
+        }
     }
 
     func reopenLastProject() {
@@ -148,20 +158,58 @@ final class Workspace: ObservableObject {
         }
     }
 
-    // MARK: µVision project import (.uvprojx)
+    // MARK: µVision project (.uvprojx) used natively
 
-    private func importUVProject(_ url: URL) {
-        guard let xml = try? XMLDocument(contentsOf: url) else {
-            NSAlert.show("Cannot import", "\(url.lastPathComponent) is not a readable µVision project.")
+    /// The µVision project DOM (kept so saving preserves everything we do not interpret).
+    private var uvDocument: XMLDocument?
+    private var uvSavedData: Data?
+    @Published private(set) var uvTargets: [String] = []
+    @Published private(set) var uvTargetIndex = 0
+
+    private func uvTargetNode(_ index: Int) -> XMLElement? {
+        (try? uvDocument?.nodes(forXPath: "/Project/Targets/Target"))?.compactMap { $0 as? XMLElement }[safe: index]
+    }
+
+    private func openUVProject(_ url: URL) {
+        guard let xml = try? XMLDocument(contentsOf: url, options: [.nodePreserveAll]) else {
+            NSAlert.show("Cannot open project", "\(url.lastPathComponent) is not a readable µVision project.")
             return
         }
+        uvDocument = xml
+        uvSavedData = xml.xmlData(options: [.nodePreserveAll])
+        uvTargets = ((try? xml.nodes(forXPath: "/Project/Targets/Target/TargetName")) ?? []).compactMap(\.stringValue)
+        let saved = UserDefaults.standard.integer(forKey: "uvTarget:" + url.path)
+        loadUVTarget(saved < uvTargets.count ? saved : 0, url: url)
+        didOpen(url)
+        let armasm = (project?.groups.flatMap(\.files) ?? []).filter { file in
+            guard let dir = projectDirectory, SourceKind(url: URL(fileURLWithPath: file)) == .asm,
+                  let text = try? String(contentsOf: dir.appendingPathComponent(file), encoding: .utf8) else { return false }
+            return BuildSystem.looksLikeArmasm(text)
+        }
+        for file in armasm {
+            buildLog.append(LogLine(text: "\(file): Keil armasm syntax, translated automatically when building."))
+        }
+    }
+
+    /// Switch the active target (toolbar "Target" popup).
+    func selectUVTarget(_ index: Int) {
+        guard let url = projectURL, uvDocument != nil, index != uvTargetIndex, index < uvTargets.count else { return }
+        saveProject()
+        loadUVTarget(index, url: url)
+        UserDefaults.standard.set(index, forKey: "uvTarget:" + url.path)
+        lastProduct = nil
+    }
+
+    private func loadUVTarget(_ index: Int, url: URL) {
+        guard let target = uvTargetNode(index) else { return }
+        uvTargetIndex = index
         func text(_ path: String, in node: XMLNode? = nil) -> String? {
-            (try? (node ?? xml).nodes(forXPath: path))?.first?.stringValue
+            (try? (node ?? target).nodes(forXPath: path))?.first?.stringValue
         }
         let name = url.deletingPathExtension().lastPathComponent
         var options = TargetOptions()
-        let deviceName = text("//TargetCommonOption/Device") ?? "ARMCM3"
-        let cpu = text("//TargetCommonOption/Cpu") ?? ""
+        let deviceName = text(".//TargetCommonOption/Device") ?? "ARMCM3"
+        let cpu = text(".//TargetCommonOption/Cpu") ?? ""
         let core: String
         if cpu.contains("Cortex-M0+") { core = "Cortex-M0+" }
         else if cpu.contains("Cortex-M0") { core = "Cortex-M0" }
@@ -182,44 +230,111 @@ final class Workspace: ObservableObject {
         if let clock = cpu.range(of: #"CLOCK\((\d+)\)"#, options: .regularExpression) {
             options.xtalMHz = (Double(cpu[clock].dropFirst(6).dropLast()) ?? 12_000_000) / 1_000_000
         }
-        options.outputName = text("//TargetCommonOption/OutputName") ?? name
-        // Device from an installed pack (SVD for the System Viewer).
-        if let packDevice = MainActor.assumeIsolated({ PackManager.shared.device(named: deviceName) }) {
+        options.outputName = text(".//TargetCommonOption/OutputName") ?? name
+        if let packDevice = MainActor.assumeIsolated({ PackManager.shared.device(named: deviceName) })
+            ?? PackSupport.installedDevice(named: deviceName) {
             let memory = (options.romBase, options.romSize, options.ramBase, options.ramSize, options.ram2, options.xtalMHz)
             options.apply(.pack(packDevice))
             // Keep the memory layout configured in the µVision project.
             (options.romBase, options.romSize, options.ramBase, options.ramSize, options.ram2, options.xtalMHz) = memory
         }
-        options.defines = text("(//Cads/VariousControls/Define)[1]") ?? ""
-        options.asmDefines = text("(//Aads/VariousControls/Define)[1]") ?? ""
-        options.includePaths = (text("(//Cads/VariousControls/IncludePath)[1]") ?? "").replacingOccurrences(of: "\\", with: "/")
+        options.defines = text(".//Cads/VariousControls/Define") ?? ""
+        options.asmDefines = text(".//Aads/VariousControls/Define") ?? ""
+        options.includePaths = (text(".//Cads/VariousControls/IncludePath") ?? "").replacingOccurrences(of: "\\", with: "/")
         // Keep Keil's own Objects/ folder untouched.
         options.outputDirectory = "ARMSim_Objects"
 
         var groups: [SourceGroup] = []
-        for group in (try? xml.nodes(forXPath: "(//Targets/Target)[1]/Groups/Group")) ?? [] {
-            let groupName = text("GroupName", in: group) ?? "Group"
-            var files: [String] = []
-            for file in (try? group.nodes(forXPath: "Files/File")) ?? [] {
-                if let path = text("FilePath", in: file) {
-                    files.append(path.replacingOccurrences(of: "\\", with: "/"))
-                }
+        for group in (try? target.nodes(forXPath: "Groups/Group")) ?? [] {
+            let files = ((try? group.nodes(forXPath: "Files/File/FilePath")) ?? []).compactMap(\.stringValue)
+                .map { $0.replacingOccurrences(of: "\\", with: "/") }
+            groups.append(SourceGroup(name: text("GroupName", in: group) ?? "Group", files: files))
+        }
+        project = ProjectFile(name: name, targetName: uvTargets[safe: index] ?? "Target 1", groups: groups, options: options)
+    }
+
+    /// Write groups/files and the options we edit back into the .uvprojx (only if something changed).
+    private func saveUVProject(_ project: ProjectFile, to url: URL) {
+        guard let xml = uvDocument, let target = uvTargetNode(uvTargetIndex) else { return }
+        func element(_ path: String) -> XMLElement? { (try? target.nodes(forXPath: path))?.first as? XMLElement }
+        func set(_ path: String, _ value: String) {
+            if let e = element(path), e.stringValue != value { e.stringValue = value }
+        }
+        set(".//TargetCommonOption/OutputName", project.options.outputName)
+        set(".//Cads/VariousControls/Define", project.options.defines)
+        set(".//Aads/VariousControls/Define", project.options.asmDefines ?? "")
+        set(".//Cads/VariousControls/IncludePath", project.options.includePaths.replacingOccurrences(of: "/", with: "\\"))
+
+        // Groups: reuse existing nodes (keeps per-group/per-file options), create missing ones.
+        let groupsNode = element("Groups") ?? {
+            let e = XMLElement(name: "Groups")
+            target.addChild(e)
+            return e
+        }()
+        let oldGroups = ((try? groupsNode.nodes(forXPath: "Group")) ?? []).compactMap { $0 as? XMLElement }
+        let currentNames = oldGroups.map { ($0.elements(forName: "GroupName").first?.stringValue ?? "") }
+        let wantedNames = project.groups.map(\.name)
+        let wantedFiles = project.groups.map { $0.files.map { Self.uvPath($0) } }
+        let currentFiles = oldGroups.map { (($0.elements(forName: "Files").first?.elements(forName: "File")) ?? [])
+            .map { $0.elements(forName: "FilePath").first?.stringValue ?? "" } }
+        guard currentNames != wantedNames || currentFiles != wantedFiles else {
+            writeUVIfChanged(xml, to: url)
+            return
+        }
+        var pool: [String: XMLElement] = [:]
+        for (i, g) in oldGroups.enumerated() { pool[currentNames[i]] = g }
+        groupsNode.setChildren(nil)
+        for (gi, group) in project.groups.enumerated() {
+            let g = pool[group.name] ?? Self.uvElement("Group", [XMLElement(name: "GroupName", stringValue: group.name)])
+            g.detach()
+            let filesNode = g.elements(forName: "Files").first ?? {
+                let e = XMLElement(name: "Files")
+                g.addChild(e)
+                return e
+            }()
+            var filePool: [String: XMLElement] = [:]
+            for f in filesNode.elements(forName: "File") { filePool[f.elements(forName: "FilePath").first?.stringValue ?? ""] = f }
+            filesNode.setChildren(nil)
+            for path in wantedFiles[gi] {
+                let f = filePool[path] ?? Self.uvElement("File", [
+                    XMLElement(name: "FileName", stringValue: (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent),
+                    XMLElement(name: "FileType", stringValue: Self.uvFileType(path)),
+                    XMLElement(name: "FilePath", stringValue: path),
+                ])
+                f.detach()
+                filesNode.addChild(f)
             }
-            groups.append(SourceGroup(name: groupName, files: files))
+            if g.elements(forName: "Files").isEmpty { g.addChild(filesNode) }
+            groupsNode.addChild(g)
         }
-        let project = ProjectFile(name: name, targetName: text("(//Targets/Target/TargetName)[1]") ?? "Target 1",
-                                  groups: groups, options: options)
-        let projectURL = url.deletingLastPathComponent().appendingPathComponent("\(name).\(ProjectFile.fileExtension)")
-        try? JSONEncoder.pretty.encode(project).write(to: projectURL)
-        open(projectURL: projectURL)
-        buildLog.append(LogLine(text: "Imported µVision project \(url.lastPathComponent) -> \(projectURL.lastPathComponent)"))
-        let armasm = groups.flatMap(\.files).filter { file in
-            guard let dir = projectDirectory, SourceKind(url: URL(fileURLWithPath: file)) == .asm,
-                  let text = try? String(contentsOf: dir.appendingPathComponent(file), encoding: .utf8) else { return false }
-            return BuildSystem.looksLikeArmasm(text)
-        }
-        for file in armasm {
-            buildLog.append(LogLine(text: "\(file): Keil armasm syntax, translated automatically when building."))
+        writeUVIfChanged(xml, to: url)
+    }
+
+    private func writeUVIfChanged(_ xml: XMLDocument, to url: URL) {
+        let data = xml.xmlData(options: [.nodePreserveAll])
+        guard data != uvSavedData else { return }
+        try? data.write(to: url)
+        uvSavedData = data
+    }
+
+    static func uvElement(_ name: String, _ children: [XMLNode]) -> XMLElement {
+        let e = XMLElement(name: name)
+        e.setChildren(children)
+        return e
+    }
+
+    /// POSIX relative path -> µVision ".\dir\file" style.
+    static func uvPath(_ path: String) -> String {
+        if path.hasPrefix("/") || path.hasPrefix(".") { return path.replacingOccurrences(of: "/", with: "\\") }
+        return ".\\" + path.replacingOccurrences(of: "/", with: "\\")
+    }
+
+    /// µVision FileType: 1 = C, 2 = Assembly, 5 = Text/header.
+    static func uvFileType(_ path: String) -> String {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "c": return "1"
+        case "s", "asm": return "2"
+        default: return "5"
         }
     }
 
@@ -461,4 +576,8 @@ extension NSAlert {
         alert.informativeText = message
         alert.runModal()
     }
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }

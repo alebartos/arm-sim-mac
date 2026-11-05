@@ -333,6 +333,7 @@ extension SmokeTest {
         func say(_ text: String) { FileHandle.standardError.write(Data(("[smoke] " + text + "\n").utf8)) }
         NSApp.windows.first { $0.isVisible }?.setContentSize(NSSize(width: 1360, height: 860))
         ws.open(projectURL: url)
+        say("targets: \(ws.uvTargets), active \(ws.uvTargetIndex)")
         say("imported: \(ws.project.map { "\($0.name), device \($0.options.device), groups \($0.groups.map(\.name)), files \($0.groups.flatMap(\.files))" } ?? "nil")")
         ws.toggleDebugSession()
         var steps = 0
