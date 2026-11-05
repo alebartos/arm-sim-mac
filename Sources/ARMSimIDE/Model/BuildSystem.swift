@@ -126,24 +126,32 @@ final class BuildSystem {
                 objects.append((source.lastPathComponent, object, source))
 
                 let upToDate = !forceAll && translateOnly == nil && isNewer(object, than: source)
-                var inputPath = source.path
                 if kind == .asm, let text = try? String(contentsOf: source, encoding: .utf8),
                    ArmasmTranslator.looksLikeArmasm(text) {
-                    // Keil armasm syntax: translate to GNU syntax (same line numbers), then assemble.
-                    let translated = objectsDir.appendingPathComponent(source.deletingPathExtension().lastPathComponent + ".armasm.s")
-                    pathRemap[canonicalPath(translated.path)] = canonicalPath(source.path)
-                    inputPath = translated.path
-                    if !upToDate {
-                        let result = ArmasmTranslator.translate(text, predefines: asmDefines)
-                        for d in result.diagnostics {
-                            log(LogLine(text: "\(source.lastPathComponent)(\(d.line)): \(d.isError ? "error" : "warning"): \(d.message)",
-                                        kind: d.isError ? .error : .warning,
-                                        location: SourceLocation(path: canonicalPath(source.path), line: d.line)))
-                            if d.isError { errors += 1 } else { warnings += 1 }
-                        }
-                        try? result.text.write(to: translated, atomically: true, encoding: .utf8)
+                    // Keil armasm syntax: native assembler (no clang involved).
+                    if upToDate { continue }
+                    log(LogLine(text: "assembling \(source.lastPathComponent)..."))
+                    let options = ArmasmAssembler.Options(
+                        arch: device.architecture, predefines: asmDefines,
+                        includePaths: project.options.includePaths.split(separator: ";").map {
+                            projectDir.appendingPathComponent(String($0).trimmingCharacters(in: .whitespaces)).path
+                        })
+                    let result = ArmasmAssembler.assemble(source: text, path: source.path, options: options)
+                    for d in result.diagnostics {
+                        let file = (d.file as NSString).lastPathComponent
+                        log(LogLine(text: "\(file)(\(d.line)): \(d.isError ? "error" : "warning"): \(d.message)",
+                                    kind: d.isError ? .error : .warning,
+                                    location: SourceLocation(path: canonicalPath(d.file), line: max(d.line, 1))))
+                        if d.isError { errors += 1 } else { warnings += 1 }
                     }
+                    if let bytes = result.object {
+                        try? Data(bytes).write(to: object)
+                    } else {
+                        try? FileManager.default.removeItem(at: object)
+                    }
+                    continue
                 }
+                let inputPath = source.path
                 if upToDate { continue }
                 log(LogLine(text: "\(kind == .asm ? "assembling" : "compiling") \(source.lastPathComponent)..."))
                 var arguments = ["clang"] + (kind == .asm ? asmFlags : cFlags)
