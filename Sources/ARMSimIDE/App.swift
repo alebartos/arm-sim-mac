@@ -342,6 +342,16 @@ extension SmokeTest {
             let loc = d.currentLocation.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" } ?? "-"
             say(String(format: "PC=0x%08X R0=0x%08X SP=0x%08X IPSR=%d  %@", d.snapshot.r[15], d.snapshot.r[0], d.snapshot.r[13], d.snapshot.ipsr, loc))
             steps += 1
+            if steps == 17, let seconds = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_RUN"].flatMap(Double.init) {
+                // Free run, then stop and report where the program is (e.g. the main loop).
+                steps += 1
+                d.run()
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                    d.stop()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: stepLoop)
+                }
+                return
+            }
             if steps > 16 {
                 say("build log:\n" + ws.buildLog.map(\.text).joined(separator: "\n"))
                 say("pack: \(ws.project?.options.packID ?? "none"), svd: \(ws.project?.options.svdPath ?? "none")")

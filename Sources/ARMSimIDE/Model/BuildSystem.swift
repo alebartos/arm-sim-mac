@@ -99,11 +99,12 @@ final class BuildSystem {
         let commonFlags = device.clangTarget + ["-mthumb", "-g"]
         let cFlags = commonFlags + ["-fno-color-diagnostics", "-fno-caret-diagnostics", project.options.optimization, "-ffreestanding", "-fno-common",
                                     "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-fno-exceptions",
-                                    "-std=gnu11"]
+                                    "-std=" + (project.options.cStandard ?? "gnu11"), "-Wno-nonportable-include-path"]
             + project.options.defines.split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" }).map { "-D\($0)" }
             + project.options.includePaths.split(separator: ";").map {
                 "-I" + projectDir.appendingPathComponent(String($0).trimmingCharacters(in: .whitespaces)).path
             }
+            + keilCompatibilityFlags(project: project, projectDir: projectDir, objectsDir: objectsDir)
             + project.options.cMiscFlags.split(separator: " ").map(String.init)
         let asmDefines = (project.options.asmDefines ?? "").split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" }).map(String.init)
         let asmFlags = commonFlags + ["-mimplicit-it=always"] + project.options.asmMiscFlags.split(separator: " ").map(String.init)
@@ -197,6 +198,7 @@ final class BuildSystem {
             let runtimeSource = objectsDir.appendingPathComponent("armsim_rt.c")
             try? RuntimeLibrary.source.write(to: runtimeSource, atomically: true, encoding: .utf8)
             runCompiler(["clang"] + device.clangTarget + ["-mthumb", "-O2", "-ffreestanding", "-fno-builtin",
+                                                          "-ffunction-sections", "-fdata-sections",
                                                           "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
                                                           "-c", runtimeSource.path, "-o", runtimeObject.path])
         }
@@ -246,6 +248,40 @@ final class BuildSystem {
     }
 
     static func looksLikeArmasm(_ text: String) -> Bool { ArmasmTranslator.looksLikeArmasm(text) }
+
+    /// What µVision adds to an Arm Compiler 6 command line: the device header folder from the pack and
+    /// its define, the RTE folder of the target, `_RTE_` / `__UVISION_VERSION`, and `__ARMCC_VERSION` so
+    /// CMSIS `cmsis_compiler.h` picks `cmsis_armclang.h` (clang understands it). Plus the bundled minimal
+    /// C library headers (stdio.h, string.h, ...).
+    private func keilCompatibilityFlags(project: ProjectFile, projectDir: URL, objectsDir: URL) -> [String] {
+        var flags = ["-D__ARMCC_VERSION=6240001", "-D__UVISION_VERSION=543"]
+        let rte = projectDir.appendingPathComponent("RTE")
+        if FileManager.default.fileExists(atPath: rte.path) {
+            flags.append("-D_RTE_")
+            let wanted = "_" + String(project.targetName.map { $0.isLetter || $0.isNumber ? $0 : "_" })
+            let folders = ((try? FileManager.default.contentsOfDirectory(atPath: rte.path)) ?? [])
+                .filter { $0.hasPrefix("_") }.sorted()
+            if let folder = folders.first(where: { $0 == wanted }) ?? folders.first {
+                flags.append("-I" + rte.appendingPathComponent(folder).path)
+            }
+        }
+        if project.options.packID != nil || DeviceInfo.all.first(where: { $0.name == project.options.device }) == nil,
+           let info = PackManager.compileInfo(device: project.options.device, packID: project.options.packID) {
+            flags.append("-I" + info.includeDir.path)
+            if let define = info.define, !define.isEmpty { flags.append("-D" + define) }
+        }
+        let libc = objectsDir.appendingPathComponent(".armsim_include")
+        try? FileManager.default.createDirectory(at: libc, withIntermediateDirectories: true)
+        for (name, text) in RuntimeLibrary.headers {
+            let url = libc.appendingPathComponent(name)
+            if (try? String(contentsOf: url, encoding: .utf8)) != text {
+                try? text.write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+        // -idirafter: the project's own headers and the compiler's freestanding ones come first.
+        flags += ["-idirafter", libc.path]
+        return flags
+    }
 
     private func isNewer(_ object: URL, than source: URL) -> Bool {
         let fm = FileManager.default

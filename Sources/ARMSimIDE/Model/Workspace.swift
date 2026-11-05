@@ -241,6 +241,11 @@ final class Workspace: ObservableObject {
         options.defines = text(".//Cads/VariousControls/Define") ?? ""
         options.asmDefines = text(".//Aads/VariousControls/Define") ?? ""
         options.includePaths = (text(".//Cads/VariousControls/IncludePath") ?? "").replacingOccurrences(of: "\\", with: "/")
+        // Arm Compiler 6 "Language C" and "Optimization" lists (index 0 = <default>).
+        let languages = ["", "c90", "gnu90", "c99", "gnu99", "c11", "gnu11"]
+        if let index = Int(text(".//Cads/v6Lang") ?? ""), index > 0, index < languages.count { options.cStandard = languages[index] }
+        let levels = ["", "-O0", "-O1", "-O2", "-O3", "-Ofast", "-Os", "-Oz", "-Oz"]
+        if let index = Int(text(".//Cads/Optim") ?? ""), index > 0, index < levels.count { options.optimization = levels[index] }
         // Keep Keil's own Objects/ folder untouched.
         options.outputDirectory = "ARMSim_Objects"
 

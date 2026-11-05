@@ -100,6 +100,8 @@ struct TargetOptions: Codable, Equatable {
     var defines = ""
     var includePaths = ""
     var cMiscFlags = ""
+    /// C language standard (clang -std=...), from µVision "Language C" (v6Lang); nil = gnu11.
+    var cStandard: String?
     var asmMiscFlags = ""
     /// Asm "Define" (armasm predefines), optional for older project files.
     var asmDefines: String?

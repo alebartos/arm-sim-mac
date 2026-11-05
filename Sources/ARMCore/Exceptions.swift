@@ -294,6 +294,9 @@ extension CPU {
             } else {
                 control &= ~2
             }
+            // SCR.SLEEPONEXIT: back to sleep instead of resuming the thread (it runs again only
+            // when the bit is cleared and the next exception returns).
+            if system.scr & 2 != 0 { sleeping = true }
         }
         exclusiveMonitor = false
         cycles &+= 10

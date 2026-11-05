@@ -528,4 +528,50 @@ final class PackManager: ObservableObject {
     }
 
     func indexEntry(_ id: String) -> PackIndexEntry? { index.first { $0.id == id } }
+
+    /// Folder of the device header and its define, from the pdsc `<compile header=… define=…/>` of the
+    /// device (or its family). Like µVision's "Collection of Component include folders". `packID` is
+    /// "Vendor.Name[.Version]"; the exact version is used when installed, otherwise the newest one.
+    nonisolated static func compileInfo(device: String, packID: String?) -> (includeDir: URL, define: String?)? {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let root = support.appendingPathComponent("ARM Sim/Packs")
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        if let packID {
+            let parts = packID.split(separator: ".", maxSplits: 2).map(String.init)
+            if parts.count >= 2 {
+                let packDir = root.appendingPathComponent(parts[0]).appendingPathComponent(parts[1])
+                let versions = ((try? fm.contentsOfDirectory(atPath: packDir.path)) ?? []).filter { !$0.hasPrefix(".") }
+                    .sorted { compareVersions($0, $1) == .orderedDescending }
+                let ordered = (parts.count == 3 && versions.contains(parts[2]) ? [parts[2]] : []) + versions
+                candidates = ordered.map { packDir.appendingPathComponent($0) }
+            }
+        } else {
+            for vendor in (try? fm.contentsOfDirectory(atPath: root.path)) ?? [] where !vendor.hasPrefix(".") {
+                for name in (try? fm.contentsOfDirectory(atPath: root.appendingPathComponent(vendor).path)) ?? [] {
+                    let packDir = root.appendingPathComponent(vendor).appendingPathComponent(name)
+                    let versions = ((try? fm.contentsOfDirectory(atPath: packDir.path)) ?? []).filter { !$0.hasPrefix(".") }
+                        .sorted { compareVersions($0, $1) == .orderedDescending }
+                    if let v = versions.first { candidates.append(packDir.appendingPathComponent(v)) }
+                }
+            }
+        }
+        for folder in candidates {
+            guard let pdsc = findPDSC(in: folder), let data = try? Data(contentsOf: pdsc),
+                  let xml = try? XMLDocument(data: data) else { continue }
+            let quoted = device.replacingOccurrences(of: "'", with: "")
+            guard var node = (try? xml.nodes(forXPath: "//device[@Dname='\(quoted)'] | //variant[@Dvariant='\(quoted)']"))?
+                .first as? XMLElement else { continue }
+            while true {
+                if let compile = node.elements(forName: "compile").first(where: { $0.attribute(forName: "header") != nil }),
+                   let header = compile.attribute(forName: "header")?.stringValue {
+                    let headerURL = folder.appendingPathComponent(header.replacingOccurrences(of: "\\", with: "/"))
+                    return (headerURL.deletingLastPathComponent(), compile.attribute(forName: "define")?.stringValue)
+                }
+                guard let parent = node.parent as? XMLElement, parent.name != "devices" else { break }
+                node = parent
+            }
+        }
+        return nil
+    }
 }
