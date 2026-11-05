@@ -100,10 +100,10 @@ struct DebugToolbar: View {
             ToolButton(icon: "play.fill", help: "Run (F5)", tint: Color(red: 0.1, green: 0.55, blue: 0.1), enabled: stopped) { debugger.run() }
             ToolButton(icon: "stop.circle.fill", help: "Stop", tint: .red, enabled: debugger.isRunning) { debugger.stop() }
             ToolbarDivider()
-            ToolButton(icon: "arrow.down.to.line", help: "Step (F11)", tint: .blue, enabled: stopped) { debugger.stepInto() }
-            ToolButton(icon: "arrow.turn.down.right", help: "Step Over (F10)", tint: .blue, enabled: stopped) { debugger.stepOver() }
-            ToolButton(icon: "arrow.up.to.line", help: "Step Out (⌃F11)", tint: .blue, enabled: stopped) { debugger.stepOut() }
-            ToolButton(icon: "arrow.right.to.line", help: "Run to Cursor Line (⌃F10)", tint: .blue, enabled: stopped) { workspace.runToCursor() }
+            ToolButton(icon: "arrow.down.to.line", help: "Step (F11 or ⌥⌘I)", tint: .blue, enabled: stopped) { debugger.stepInto() }
+            ToolButton(icon: "arrow.turn.down.right", help: "Step Over (F10 or ⌥⌘O)", tint: .blue, enabled: stopped) { debugger.stepOver() }
+            ToolButton(icon: "arrow.up.to.line", help: "Step Out (⌃F11 or ⌥⌘U)", tint: .blue, enabled: stopped) { debugger.stepOut() }
+            ToolButton(icon: "arrow.right.to.line", help: "Run to Cursor Line (⌃F10 or ⌥⌘R)", tint: .blue, enabled: stopped) { workspace.runToCursor() }
             ToolbarDivider()
             ToolButton(icon: "arrow.right.circle.fill", help: "Show Next Statement", tint: Color(red: 0.85, green: 0.65, blue: 0),
                        enabled: stopped) { workspace.showNextStatement() }

@@ -132,6 +132,13 @@ struct AppCommands: Commands {
             Divider()
             Button("Step Instruction (disassembly level)") { ws.debugger.stepInto(instructionLevel: true) }
                 .keyboardShortcut(functionKey(11), modifiers: [.shift])
+            // macOS reserves F11 for "Show Desktop": alternatives that always work.
+            Menu("Alternate Shortcuts (if F10/F11 are taken by macOS)") {
+                Button("Step") { ws.debugger.stepInto() }.keyboardShortcut("i", modifiers: [.command, .option])
+                Button("Step Over") { ws.debugger.stepOver() }.keyboardShortcut("o", modifiers: [.command, .option])
+                Button("Step Out") { ws.debugger.stepOut() }.keyboardShortcut("u", modifiers: [.command, .option])
+                Button("Run to Cursor Line") { ws.runToCursor() }.keyboardShortcut("r", modifiers: [.command, .option])
+            }
             Divider()
             Button("Insert/Remove Breakpoint") { ws.toggleBreakpointAtCursor() }.keyboardShortcut(functionKey(9), modifiers: [])
             Button("Kill All Breakpoints in Current Target") { ws.removeAllBreakpoints() }
