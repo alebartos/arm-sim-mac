@@ -32,10 +32,21 @@ public enum ArmasmAssembler {
         }
     }
 
+    /// One emitted statement, for listings (.lst).
+    public struct ListingRow: Sendable {
+        public let file: String
+        public let line: Int
+        public let area: String
+        public let offset: Int
+        public let bytes: [UInt8]
+        public let isCode: Bool
+    }
+
     public struct Output {
         /// ELF relocatable object; nil when there are errors.
         public var object: [UInt8]?
         public var diagnostics: [ArmasmDiagnostic]
+        public var listing: [ListingRow] = []
         public var errorCount: Int { diagnostics.filter(\.isError).count }
     }
 
@@ -189,7 +200,8 @@ private final class Assembly: ExprEnvironment {
             return .init(object: nil, diagnostics: diagnostics)
         }
         let object = emit()
-        return .init(object: diagnostics.contains(where: \.isError) ? nil : object, diagnostics: diagnostics)
+        return .init(object: diagnostics.contains(where: \.isError) ? nil : object, diagnostics: diagnostics,
+                     listing: listing)
     }
 
     // MARK: Lexing
@@ -779,7 +791,14 @@ private final class Assembly: ExprEnvironment {
                 return
             }
         }
-        let key = expression.replacingOccurrences(of: " ", with: "").uppercased()
+        // armasm shares pool entries with the same value (not just the same text).
+        var key = "text:" + expression.replacingOccurrences(of: " ", with: "").uppercased()
+        if let v = try? ExprParser.evaluate(expression, env: self), let value = try? asmValue(v) {
+            switch value {
+            case .constant(let c): key = "const:\(UInt32(truncatingIfNeeded: c))"
+            case .symbol(let name, let addend): key = "sym:\(name)+\(UInt32(truncatingIfNeeded: addend))"
+            }
+        }
         var area = areas[currentArea]
         let literalLabel: String
         if let existing = area.pendingLiterals.first(where: { $0.key == key }) {
@@ -1237,6 +1256,12 @@ private final class Assembly: ExprEnvironment {
     var sectionRelocations: [[(offset: Int, type: UInt32, value: AsmValue)]] = []
     var sectionMapping: [[(offset: Int, isData: Bool)]] = []
     var lineRows: [[(offset: Int, file: Int, line: Int)]] = []
+    var listing: [ArmasmAssembler.ListingRow] = []
+
+    func list(_ s: Statement, _ bytes: [UInt8], code: Bool) {
+        listing.append(.init(file: files[s.file], line: s.line, area: areas[s.area].name, offset: s.offset,
+                             bytes: bytes, isCode: code))
+    }
 
     func runPass(emit: Bool, sticky: Bool = true) {
         var cursor = [Int](repeating: 0, count: areas.count)
@@ -1285,6 +1310,7 @@ private final class Assembly: ExprEnvironment {
                 if let e = encodeInstruction(index, emitErrors: emit) {
                     s.size = e.bytes.count
                     if emit {
+                        list(s, e.bytes, code: true)
                         sectionBytes[area] += e.bytes
                         for f in e.fixups {
                             guard let type = relocationType(f.kind) else {
@@ -1316,6 +1342,7 @@ private final class Assembly: ExprEnvironment {
                     if emit && !areas[area].isNoInit {
                         if size > 0 { mark(area, data: !(directive == "DCI")) }
                         sectionBytes[area] += bytes
+                        if size > 0 { list(s, bytes, code: false) }
                         for r in relocations { sectionRelocations[area].append((s.offset + r.offset, r.type, r.value)) }
                     }
                     if emit && areas[area].isNoInit && relocations.isEmpty && bytes.contains(where: { $0 != 0 }) {

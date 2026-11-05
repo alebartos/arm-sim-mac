@@ -107,6 +107,20 @@ while !arguments.isEmpty {
         }
         guard let object = result.object else { exit(1) }
         do { try Data(object).write(to: URL(fileURLWithPath: out)) } catch { fail("cannot write \(out)") }
+        if ProcessInfo.processInfo.environment["ARMSIM_LISTING"] != nil {
+            // line offset bytes (instructions as halfwords, like a Keil listing)
+            for row in result.listing {
+                let hex: String
+                if row.isCode {
+                    hex = stride(from: 0, to: row.bytes.count - 1, by: 2).map {
+                        String(format: "%04X", UInt16(row.bytes[$0]) | UInt16(row.bytes[$0 + 1]) << 8)
+                    }.joined(separator: " ")
+                } else {
+                    hex = row.bytes.map { String(format: "%02X", $0) }.joined()
+                }
+                print("\((row.file as NSString).lastPathComponent) \(row.line) \(row.area) \(String(format: "%08X", row.offset)) \(row.isCode ? "C" : "D") \(hex)")
+            }
+        }
         exit(0)
     default:
         if arg.hasPrefix("-") { fail("unknown option \(arg)\n\n\(usage)") }
