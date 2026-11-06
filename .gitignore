@@ -10,3 +10,6 @@ templates/
 
 # Keil µVision reference screenshots (local only)
 KeilScreens/
+
+# Local roadmap (not published)
+TODO.md

@@ -72,7 +72,7 @@ armsim --list out.lst --assemble startup.s startup.o
 
 ## Status
 
-See [TODO.md](TODO.md) for the roadmap. The main items still open are:
+The main items still open are:
 - PWM, I2C and SSP0.
 - A 1:1 µVision interface.
 - Cortex-M7 double precision.
