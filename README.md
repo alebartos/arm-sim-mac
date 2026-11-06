@@ -39,8 +39,8 @@ It has been tested mainly on the LPC1768 / LandTiger projects of the Politecnico
 
 ## Install the release
 
-1. Download `ARM-Sim-<version>-macOS.zip` from [Releases](../../releases).
-2. Unzip it and move `ARM Sim.app` to `/Applications`.
+1. Download `ARM-Sim-<version>-macOS.dmg` from [Releases](../../releases).
+2. Open the DMG and drag `ARM Sim.app` to the `Applications` folder.
 3. The app is not notarized, so macOS blocks the first launch. To allow it, do one of these:
    - Right-click the app, select **Open**, then select **Open** again.
    - Run `xattr -dr com.apple.quarantine "/Applications/ARM Sim.app"`.
@@ -51,6 +51,7 @@ The release build is for Apple silicon (arm64). On an Intel Mac, build the app f
 
 ```sh
 ./scripts/make-app.sh          # creates build/ARM Sim.app
+./scripts/make-dmg.sh v0.1.1   # also packs it into build/ARM-Sim-v0.1.1-macOS.dmg
 open "build/ARM Sim.app"
 ```
 
