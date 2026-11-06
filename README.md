@@ -77,3 +77,9 @@ The main items still open are:
 - A 1:1 µVision interface.
 - Cortex-M7 double precision.
 - Real hardware debugging.
+
+## License
+
+ARM Sim is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may use, study and change it for any noncommercial purpose, including personal study, teaching and research.
+
+Commercial use, including selling or redistributing the app for a fee, needs a separate license from the author.
