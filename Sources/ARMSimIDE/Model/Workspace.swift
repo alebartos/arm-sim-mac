@@ -457,6 +457,7 @@ final class Workspace: ObservableObject {
             DispatchQueue.main.async {
                 self.lastProduct = product
                 self.isBuilding = false
+                if product != nil { StarPrompt.showAfterSuccessfulBuildIfNeeded() }
             }
         }
     }

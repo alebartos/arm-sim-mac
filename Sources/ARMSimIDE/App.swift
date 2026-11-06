@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SmokeTest.run(folder: URL(fileURLWithPath: args[i + 1]))
         } else {
             Workspace.shared.reopenLastProject()
+            StarPrompt.showAtFirstLaunchIfNeeded()
         }
     }
 
@@ -160,6 +161,10 @@ struct AppCommands: Commands {
 
         CommandGroup(after: .sidebar) {
             ViewMenuItems()
+        }
+
+        CommandGroup(after: .help) {
+            Button("Star ARM Sim on GitHub…") { StarPrompt.openRepository() }
         }
     }
 }
