@@ -423,6 +423,7 @@ extension SmokeTest {
                 case "pinconnect": view = AnyView(PinConnectWindow())
                 case "toolbox": view = AnyView(ToolboxWindow())
                 case "lasetup": view = AnyView(LogicAnalyzerSetup(analyzer: LogicAnalyzer.shared))
+                case "packs": view = AnyView(PackInstallerView().frame(width: 1280, height: 720))
                 default: view = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
                 }
                 let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
