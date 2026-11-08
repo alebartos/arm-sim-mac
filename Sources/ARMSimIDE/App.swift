@@ -380,6 +380,10 @@ extension SmokeTest {
         if let findTab {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { FindInFiles.shared.openDialog(tab: findTab) }
         }
+        // ARMSIM_SHOT_WIZARD=1: show the Configuration Wizard tab of the open file (ARMSIM_SHOT_OPEN).
+        if ProcessInfo.processInfo.environment["ARMSIM_SHOT_WIZARD"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { EditorArea.wizardRequested = true; ws.objectWillChange.send() }
+        }
         // ARMSIM_SHOT_MANAGE=1: capture Project ▸ Manage ▸ Project Items.
         let manageSheet = ProcessInfo.processInfo.environment["ARMSIM_SHOT_MANAGE"] != nil
         if manageSheet {

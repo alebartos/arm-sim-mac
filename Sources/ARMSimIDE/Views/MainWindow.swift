@@ -214,9 +214,11 @@ struct EditorArea: View {
     @ObservedObject var bookmarks = Bookmarks.shared
     @LocalState private var revealToken = 0
     @LocalState private var wizardTab: [String: Int] = [:]
+    /// Screenshot harness: show the Configuration Wizard tab.
+    static var wizardRequested = false
 
     private func showWizard(_ document: SourceDocument) -> Bool {
-        (wizardTab[document.id] ?? 0) == 1 && ConfigWizard.hasWizard(document.text)
+        ((wizardTab[document.id] ?? 0) == 1 || Self.wizardRequested) && ConfigWizard.hasWizard(document.text)
     }
 
     init(workspace: Workspace) {

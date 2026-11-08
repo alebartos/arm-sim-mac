@@ -9,6 +9,9 @@ struct ConfigWizardView: View {
     @LocalState private var selected: Int?
     @LocalState private var editing: Int?
     @LocalState private var editText = ""
+    @AppStorage("configWizardShowGrid") private var showGrid = false
+
+    private static let optionWidth: CGFloat = 370
 
     private struct Row: Identifiable {
         let item: ConfigItem
@@ -20,10 +23,25 @@ struct ConfigWizardView: View {
     var body: some View {
         let items = ConfigWizard.parse(document.text)
         let rows = visibleRows(items, level: 0, enabled: true)
-        let selectedItem = rows.first { $0.id == selected }?.item
+        let selectedItem = rows.first { $0.id == selected }?.item ?? rows.first?.item
         VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button("Expand All") { collapsed = [] }
+                Button("Collapse All") { collapsed = Set(allContainers(items)) }
+                Spacer().frame(width: 60)
+                Button("Help") {
+                    NSWorkspace.shared.open(URL(string: "https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/configWizard.html")!)
+                }
+                Toggle("Show Grid", isOn: $showGrid).toggleStyle(.checkbox)
+                Spacer()
+            }
+            .font(.system(size: 11))
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .background(UVColors.chrome)
             HStack(spacing: 0) {
-                Text("Option").frame(width: 320, alignment: .leading).padding(.leading, 6)
+                Text("Option").frame(width: Self.optionWidth - 7, alignment: .leading).padding(.leading, 6)
                 Divider()
                 Text("Value").padding(.leading, 6)
                 Spacer()
@@ -48,26 +66,17 @@ struct ConfigWizardView: View {
 
             Divider()
             ScrollView {
-                Text(description(for: selectedItem))
-                    .font(UVColors.small)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(6)
-                    .textSelection(.enabled)
-            }
-            .frame(height: 58)
-            .background(Color(white: 0.97))
-
-            HStack(spacing: 8) {
-                Button("Expand All") { collapsed = [] }
-                Button("Collapse All") { collapsed = Set(allContainers(items)) }
-                Button("Help") {
-                    NSWorkspace.shared.open(URL(string: "https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/configWizard.html")!)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(selectedItem?.title ?? "").bold()
+                    Text(description(for: selectedItem))
                 }
-                Spacer()
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(6)
+                .textSelection(.enabled)
             }
-            .controlSize(.small)
-            .padding(6)
-            .background(UVColors.chrome)
+            .frame(height: 90)
+            .background(Color.white)
         }
     }
 
@@ -109,16 +118,16 @@ struct ConfigWizardView: View {
                     Spacer().frame(width: 12)
                 }
                 Text(item.title.isEmpty ? " " : item.title)
-                    .font(item.kind == .notice ? .system(size: 11).italic()
-                          : .system(size: 11, weight: item.isContainer ? .semibold : .regular))
+                    .font(item.kind == .notice ? .system(size: 11).italic() : .system(size: 11))
                     .foregroundColor(isSelected ? .white : (row.enabled ? .black : .gray))
                     .padding(.horizontal, 2)
                     .background(isSelected ? UVColors.changed : .clear)
                     .lineLimit(1)
                 Spacer(minLength: 4)
             }
-            .frame(width: 320, alignment: .leading)
+            .frame(width: Self.optionWidth, alignment: .leading)
             .contentShape(Rectangle())
+            .overlay(Rectangle().frame(width: showGrid ? 1 : 0).foregroundColor(UVColors.grid), alignment: .trailing)
             .onTapGesture { selected = item.id }
 
             valueView(item)
@@ -127,7 +136,8 @@ struct ConfigWizardView: View {
             Spacer(minLength: 0)
         }
         .frame(height: 20)
-        .overlay(Rectangle().frame(height: 0.5).foregroundColor(Color(white: 0.9)), alignment: .bottom)
+        .background(isSelected ? Color(white: 0.93) : Color.clear)
+        .overlay(Rectangle().frame(height: showGrid ? 1 : 0).foregroundColor(UVColors.grid), alignment: .bottom)
     }
 
     @ViewBuilder
@@ -192,7 +202,7 @@ struct ConfigWizardView: View {
     private func numberField(_ item: ConfigItem) -> some View {
         if editing == item.id {
             TextField("", text: $editText, onCommit: {
-                if let value = ConfigWizard.parseNumber(editText), isValid(value, item) {
+                if let value = ConfigWizard.parseNumber(editText.replacingOccurrences(of: " ", with: "")), isValid(value, item) {
                     commit(.number(id: item.id, value: value))
                 } else {
                     NSSound.beep()
@@ -203,7 +213,7 @@ struct ConfigWizardView: View {
             .onExitCommand { editing = nil }
         } else {
             Text(format(item))
-                .font(UVColors.mono)
+                .font(.system(size: 11))
                 .frame(width: 160, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) {
@@ -221,7 +231,14 @@ struct ConfigWizardView: View {
         if item.isHex, n >= 0 {
             let digits = max(1, (item.valueToken ?? "0x0").dropFirst(2).prefix { $0.isHexDigit }.count)
             let hex = String(UInt64(n), radix: 16, uppercase: true)
-            return "0x" + String(repeating: "0", count: max(0, digits - hex.count)) + hex
+            let padded = String(repeating: "0", count: max(0, digits - hex.count)) + hex
+            // µVision groups long hex values by four digits: 0x0000 0200.
+            guard padded.count > 4 else { return "0x" + padded }
+            let full = String(repeating: "0", count: (4 - padded.count % 4) % 4) + padded
+            var groups: [String] = []
+            var rest = Substring(full)
+            while !rest.isEmpty { groups.append(String(rest.prefix(4))); rest = rest.dropFirst(4) }
+            return "0x" + groups.joined(separator: " ")
         }
         return String(n)
     }
@@ -235,8 +252,7 @@ struct ConfigWizardView: View {
 
     private func description(for item: ConfigItem?) -> String {
         guard let item else { return "Select an option to see its description." }
-        var parts: [String] = [item.title]
-        parts += item.info
+        var parts: [String] = item.info
         if let min = item.minimum, let max = item.maximum {
             var range = "Range: \(min) – \(max)"
             if let step = item.step { range += ", step \(step)" }
