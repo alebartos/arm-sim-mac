@@ -97,7 +97,7 @@ struct ConfigurationDialog: View {
             .padding(.leading, 6)
             Toggle("Show Line Numbers", isOn: type.lineNumbers)
             Toggle("Use monospaced Font", isOn: type.monospaced)
-            if outlining { Toggle("Open with Outlining", isOn: .constant(false)).disabled(true).help("Outlining is not available yet") }
+            if outlining { Toggle("Open with Outlining", isOn: type.outlining) }
         }
     }
 

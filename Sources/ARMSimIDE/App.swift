@@ -382,6 +382,10 @@ extension SmokeTest {
             if let dir = ws.projectDirectory { ws.openDocument(dir.appendingPathComponent(String(file))) }
         }
         if debug { ws.toggleDebugSession() }
+        // ARMSIM_SHOT_OUTLINE=collapse: Edit ▸ Outlining ▸ Collapse All Definitions in the active editor.
+        if ProcessInfo.processInfo.environment["ARMSIM_SHOT_OUTLINE"] == "collapse" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { (EditorCommands.textView as? EditorTextView)?.setAllFolds(true) }
+        }
         // ARMSIM_SHOT_CARET=<line>:<column>: put the caret there in the active editor.
         if let caret = ProcessInfo.processInfo.environment["ARMSIM_SHOT_CARET"]?.split(separator: ":").compactMap({ Int($0) }), caret.count == 2 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

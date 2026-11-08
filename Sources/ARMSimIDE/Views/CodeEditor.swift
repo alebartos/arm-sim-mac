@@ -27,6 +27,7 @@ struct CodeEditor: NSViewRepresentable {
         layout.addTextContainer(container)
 
         let textView = EditorTextView(frame: .zero, textContainer: container)
+        layout.delegate = textView
         textView.isRichText = false
         textView.usesFindBar = true
         textView.allowsUndo = true
@@ -178,11 +179,160 @@ struct CodeEditor: NSViewRepresentable {
 }
 
 /// Source text view with µVision's editor context menu.
-final class EditorTextView: NSTextView {
+final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
     private var ws: Workspace { Workspace.shared }
     /// File type of the document (tab and indentation settings).
     var kind: SourceKind = .other
     private var config: EditorConfig { EditorSettings.shared.config }
+
+    // MARK: Outlining (folding)
+
+    static let foldKey = NSAttributedString.Key("ARMSimFolded")
+    private var foldCache: (text: Int, regions: [Int: NSRange])?
+
+    var outliningEnabled: Bool { config.fileType(kind).outlining && kind != .other }
+
+    /// Foldable blocks by 1-based start line: from after a `{` to its matching `}` on a later line, and the
+    /// inside of a multi-line /* */ comment. Strings, chars and // comments are skipped.
+    func foldRegions() -> [Int: NSRange] {
+        let text = string as NSString
+        if let cache = foldCache, cache.text == text.hash &+ text.length { return cache.regions }
+        var regions: [Int: NSRange] = [:]
+        var stack: [(index: Int, line: Int)] = []
+        var line = 1, i = 0
+        let n = text.length
+        func ch(_ k: Int) -> unichar { k < n ? text.character(at: k) : 0 }
+        while i < n {
+            let c = ch(i)
+            switch c {
+            case 10: line += 1
+            case 47 where ch(i + 1) == 47: // //
+                while i < n && ch(i) != 10 { i += 1 }
+                continue
+            case 47 where ch(i + 1) == 42: // /*
+                let startLine = line, start = i + 2
+                i += 2
+                while i < n && !(ch(i) == 42 && ch(i + 1) == 47) { if ch(i) == 10 { line += 1 }; i += 1 }
+                if line > startLine { regions[startLine] = NSRange(location: start, length: i - start) }
+                i += 2
+                continue
+            case 34, 39: // "..." '...'
+                i += 1
+                while i < n && ch(i) != c && ch(i) != 10 { if ch(i) == 92 { i += 1 }; i += 1 }
+            case 123: stack.append((i, line))
+            case 125:
+                if let open = stack.popLast(), line > open.line, regions[open.line] == nil {
+                    regions[open.line] = NSRange(location: open.index + 1, length: i - open.index - 1)
+                }
+            default: break
+            }
+            i += 1
+        }
+        foldCache = (text.hash &+ text.length, regions)
+        return regions
+    }
+
+    func isFolded(_ range: NSRange) -> Bool {
+        guard let storage = textStorage, range.location < storage.length else { return false }
+        return storage.attribute(Self.foldKey, at: range.location, effectiveRange: nil) != nil
+    }
+
+    func setFolded(_ range: NSRange, _ folded: Bool) {
+        guard let storage = textStorage, NSMaxRange(range) <= storage.length, range.length > 0 else { return }
+        if folded { storage.addAttribute(Self.foldKey, value: true, range: range) } else { storage.removeAttribute(Self.foldKey, range: range) }
+        layoutManager?.invalidateGlyphs(forCharacterRange: range, changeInLength: 0, actualCharacterRange: nil)
+        layoutManager?.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+        // A caret inside the hidden text moves to the start of the fold.
+        if folded, NSLocationInRange(selectedRange().location, range) { setSelectedRange(NSRange(location: range.location, length: 0)) }
+        needsDisplay = true
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
+    /// Edit ▸ Outlining ▸ Toggle Outlining Expansion: the block starting on the caret line (or enclosing it).
+    func toggleFoldAtCaret() {
+        let text = string as NSString
+        let caret = min(selectedRange().location, text.length)
+        let line = text.substring(to: caret).reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        let regions = foldRegions()
+        if let r = regions[line] { setFolded(r, !isFolded(r)); return }
+        if let inner = regions.values.filter({ NSLocationInRange(caret, $0) }).min(by: { $0.length < $1.length }) {
+            setFolded(inner, !isFolded(inner))
+        }
+    }
+
+    /// Collapse All Definitions: every top-level block (function bodies, multi-line comments); Expand All.
+    func setAllFolds(_ folded: Bool) {
+        let regions = foldRegions().values.sorted { $0.location < $1.location }
+        guard folded else {
+            if let storage = textStorage { setFolded(NSRange(location: 0, length: storage.length), false) }
+            return
+        }
+        var end = -1
+        for r in regions where r.location > end {
+            setFolded(r, true)
+            end = NSMaxRange(r)
+        }
+    }
+
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties props: UnsafePointer<NSLayoutManager.GlyphProperty>, characterIndexes charIndexes: UnsafePointer<Int>,
+                       font aFont: NSFont, forGlyphRange glyphRange: NSRange) -> Int {
+        guard let storage = textStorage else { return 0 }
+        var any = false
+        var newProps = [NSLayoutManager.GlyphProperty](repeating: [], count: glyphRange.length)
+        for i in 0..<glyphRange.length {
+            newProps[i] = props[i]
+            let index = charIndexes[i]
+            if index < storage.length, storage.attribute(Self.foldKey, at: index, effectiveRange: nil) != nil {
+                // The first hidden character becomes the "..." box (a control glyph given a width), the rest vanish.
+                newProps[i] = isFoldStart(index) ? .controlCharacter : .null
+                any = true
+            }
+        }
+        guard any else { return 0 }
+        layoutManager.setGlyphs(glyphs, properties: newProps, characterIndexes: charIndexes, font: aFont, forGlyphRange: glyphRange)
+        return glyphRange.length
+    }
+
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldUse action: NSLayoutManager.ControlCharacterAction,
+                       forControlCharacterAt charIndex: Int) -> NSLayoutManager.ControlCharacterAction {
+        if let storage = textStorage, charIndex < storage.length, storage.attribute(Self.foldKey, at: charIndex, effectiveRange: nil) != nil {
+            return isFoldStart(charIndex) ? .whitespace : .zeroAdvancement
+        }
+        return action
+    }
+
+    func layoutManager(_ layoutManager: NSLayoutManager, boundingBoxForControlGlyphAt glyphIndex: Int, for textContainer: NSTextContainer,
+                       proposedLineFragment proposedRect: NSRect, glyphPosition: NSPoint, characterIndex charIndex: Int) -> NSRect {
+        let width = isFoldStart(charIndex) ? EditorStyle.charWidth(EditorSettings.shared.font(for: kind)) * 3 + 6 : 0
+        return NSRect(x: glyphPosition.x, y: 0, width: width, height: proposedRect.height)
+    }
+
+    private func isFoldStart(_ index: Int) -> Bool {
+        guard let storage = textStorage, index < storage.length,
+              storage.attribute(Self.foldKey, at: index, effectiveRange: nil) != nil else { return false }
+        return index == 0 || storage.attribute(Self.foldKey, at: index - 1, effectiveRange: nil) == nil
+    }
+
+    /// "..." boxes of the collapsed blocks.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let storage = textStorage, let layout = layoutManager, let container = textContainer, storage.length > 0 else { return }
+        let font = EditorSettings.shared.font(for: kind)
+        storage.enumerateAttribute(Self.foldKey, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard value != nil else { return }
+            let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: range.location, length: 1), actualCharacterRange: nil)
+            var rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            guard rect.intersects(dirtyRect), rect.width > 4 else { return }
+            let box = rect.insetBy(dx: 1.5, dy: 1.5)
+            NSColor(calibratedWhite: 0.5, alpha: 1).setStroke()
+            NSBezierPath(rect: box).stroke()
+            ("..." as NSString).draw(at: NSPoint(x: box.minX + 2, y: box.minY - 1),
+                                     withAttributes: [.font: font, .foregroundColor: NSColor(calibratedWhite: 0.35, alpha: 1)])
+        }
+    }
 
     // MARK: Code completion (Edit ▸ Configuration ▸ Text Completion ▸ Symbols after N Characters)
 
@@ -546,7 +696,7 @@ final class GutterView: NSRulerView {
         self.textView = textView
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
-        ruleThickness = 52
+        ruleThickness = 64
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged),
                                                name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
     }
@@ -616,9 +766,13 @@ final class GutterView: NSRulerView {
             .foregroundColor: NSColor(calibratedWhite: 0.45, alpha: 1),
         ]
         let length = (textView.string as NSString).length
+        let editor = textView as? EditorTextView
+        let folds = editor?.outliningEnabled == true ? editor?.foldRegions() ?? [:] : [:]
 
         for line in firstLine...max(firstLine, lastLine) {
             let start = lineStart(line)
+            // Lines inside a collapsed block are not drawn.
+            if start > 0, let editor, editor.isFolded(NSRange(location: start - 1, length: 1)) { continue }
             var fragment: NSRect
             if start >= length {
                 fragment = layout.extraLineFragmentRect
@@ -672,10 +826,27 @@ final class GutterView: NSRulerView {
                 arrow.lineWidth = 0.8
                 arrow.stroke()
             }
+            if let region = folds[line], let editor {
+                // Outlining box: minus = expanded, plus = collapsed.
+                let box = NSRect(x: ruleThickness - 12.5, y: y + (h - 9) / 2 + 0.5, width: 8, height: 8)
+                NSColor.white.setFill()
+                box.fill()
+                NSColor(calibratedWhite: 0.5, alpha: 1).setStroke()
+                NSBezierPath(rect: box).stroke()
+                let mark = NSBezierPath()
+                mark.move(to: NSPoint(x: box.minX + 2, y: box.midY))
+                mark.line(to: NSPoint(x: box.maxX - 2, y: box.midY))
+                if editor.isFolded(region) {
+                    mark.move(to: NSPoint(x: box.midX, y: box.minY + 2))
+                    mark.line(to: NSPoint(x: box.midX, y: box.maxY - 2))
+                }
+                NSColor(calibratedWhite: 0.25, alpha: 1).setStroke()
+                mark.stroke()
+            }
             guard showLineNumbers else { continue }
             let label = "\(line)" as NSString
             let size = label.size(withAttributes: attributes)
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 5, y: y + (h - size.height) / 2), withAttributes: attributes)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 16, y: y + (h - size.height) / 2), withAttributes: attributes)
         }
     }
 
@@ -689,6 +860,14 @@ final class GutterView: NSRulerView {
         } else {
             let glyph = layout.glyphIndex(for: NSPoint(x: 0, y: y), in: container)
             line = lineNumber(forCharacterIndex: layout.characterIndexForGlyph(at: glyph))
+        }
+        // Click on the outlining box: collapse / expand that block.
+        let x = convert(event.locationInWindow, from: nil).x
+        if x >= ruleThickness - 15, let editor = textView as? EditorTextView, editor.outliningEnabled,
+           let region = editor.foldRegions()[line] {
+            editor.setFolded(region, !editor.isFolded(region))
+            needsDisplay = true
+            return
         }
         onToggleBreakpoint?(line)
         needsDisplay = true
@@ -741,8 +920,11 @@ enum SyntaxHighlighter {
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
         storage.beginEditing()
+        var folds: [NSRange] = []
+        storage.enumerateAttribute(EditorTextView.foldKey, in: full) { value, range, _ in if value != nil { folds.append(range) } }
         storage.setAttributes([.font: settings.font(for: kind), .foregroundColor: settings.color(prefix, "text"),
                                .paragraphStyle: EditorStyle.paragraph(for: kind)], range: full)
+        for range in folds { storage.addAttribute(EditorTextView.foldKey, value: true, range: range) }
         var rules: [(NSRegularExpression, String)] = []
         if type.syntaxColoring {
             switch kind {

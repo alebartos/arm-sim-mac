@@ -47,9 +47,10 @@ struct AppCommands: Commands {
             Button("Incremental Find") { EditorCommands.showFindBar(incremental: true) }.keyboardShortcut("i", modifiers: [.control])
             Divider()
             Menu("Outlining") {
-                Button("Toggle Outlining Expansion") {}.disabled(true)
-                Button("Collapse All Definitions") {}.disabled(true)
-                Button("Expand All Definitions") {}.disabled(true)
+                Button("Toggle Outlining Expansion") { (EditorCommands.textView as? EditorTextView)?.toggleFoldAtCaret() }
+                    .keyboardShortcut("m", modifiers: [.control])
+                Button("Collapse All Definitions") { (EditorCommands.textView as? EditorTextView)?.setAllFolds(true) }
+                Button("Expand All Definitions") { (EditorCommands.textView as? EditorTextView)?.setAllFolds(false) }
             }
             Menu("Advanced") {
                 Button("Go To Line…") { ws.showGoToLine = true }.keyboardShortcut("g", modifiers: [.control])

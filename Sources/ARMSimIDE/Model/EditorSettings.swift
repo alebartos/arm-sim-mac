@@ -11,6 +11,8 @@ struct EditorConfig: Codable, Equatable {
         var tabSize = 4
         var lineNumbers = true
         var monospaced = true
+        /// Open with Outlining: fold markers in the margin (C/C++ files).
+        var outlining = false
     }
 
     struct Template: Codable, Equatable, Identifiable {
@@ -33,7 +35,7 @@ struct EditorConfig: Codable, Equatable {
     var autoReload = false
     var saveProjectBeforeDebug = false
     var saveFilesBeforeDebug = true
-    var c = FileType(syntaxColoring: true, insertSpaces: false, tabSize: 2, lineNumbers: true, monospaced: true)
+    var c = FileType(syntaxColoring: true, insertSpaces: false, tabSize: 2, lineNumbers: true, monospaced: true, outlining: true)
     var asm = FileType(syntaxColoring: true, insertSpaces: false, tabSize: 4, lineNumbers: true, monospaced: true)
     var text = FileType(syntaxColoring: false, insertSpaces: false, tabSize: 4, lineNumbers: false, monospaced: true)
 
