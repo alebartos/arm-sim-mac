@@ -205,7 +205,9 @@ final class DebugController: ObservableObject {
             guard let s = product.image.symbol(named: name), !s.isFunction else { return nil }
             return (s.address, [1, 2, 4].contains(Int(s.size)) ? Int(s.size) : 4)
         }
-        log("Load \"\(product.axfURL.deletingLastPathComponent().lastPathComponent)/\(product.axfURL.lastPathComponent)\"")
+        // As µVision: the full image path, then one "WS 1, `expr" per Watch 1 entry restored from the project.
+        log("Load \"\(product.axfURL.path)\"")
+        for expression in watchExpressions { log("WS 1, `\(expression)") }
         queue.async { [weak self] in
             guard let self else { return }
             self.makeSimulator()

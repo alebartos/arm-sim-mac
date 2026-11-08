@@ -1,3 +1,4 @@
+import AppKit
 import ARMCore
 import SwiftUI
 
@@ -20,14 +21,16 @@ struct MainWindow: View {
                 HSplitView {
                     if showLeft {
                         leftPane
-                            .frame(minWidth: 180, idealWidth: 250, maxWidth: 500)
+                            .frame(minWidth: 240, idealWidth: 245, maxWidth: 500)
                     }
                     centerPane
-                        .frame(minWidth: 300)
+                        .frame(minWidth: 300, maxWidth: .infinity)
+                        .layoutPriority(1)
                 }
-                .frame(minHeight: 200)
+                .frame(minHeight: 200, maxHeight: .infinity)
+                .layoutPriority(1)
                 bottomPane
-                    .frame(minHeight: 90, idealHeight: 190)
+                    .frame(minHeight: 170, idealHeight: 220)
             }
             StatusBar(workspace: workspace)
         }
@@ -114,9 +117,10 @@ struct MainWindow: View {
                     PaneHeader(title: "Disassembly") { layout.showDisassembly = false }
                     DisassemblyPanel(workspace: workspace, debugger: workspace.debugger)
                 }
-                .frame(minHeight: 80, idealHeight: 220)
+                .frame(minHeight: 80, idealHeight: 120)
                 EditorArea(workspace: workspace)
-                    .frame(minHeight: 120)
+                    .frame(minHeight: 120, maxHeight: .infinity)
+                    .layoutPriority(1)
             }
         } else {
             EditorArea(workspace: workspace)
@@ -289,20 +293,22 @@ struct StatusBar: View {
         self.debugger = workspace.debugger
     }
 
+    /// µVision's status bar: message | debugger ("Simulation") | t1 | L:C | CAP NUM SCRL OVR R/W, with the
+    /// same fixed cells in edit and debug mode (t1 stays empty while editing).
     var body: some View {
         HStack(spacing: 0) {
-            Text(workspace.isBuilding ? "Building…" : workspace.mode == .debug ? (debugger.isRunning ? "Running…" : "Simulation") : "")
+            Text(workspace.isBuilding ? "Building…" : debugger.isRunning ? "Running…" : "")
                 .padding(.horizontal, 6)
-            Spacer()
-            if workspace.mode == .debug {
-                cell(String(format: "t1: %.8f sec", Double(debugger.snapshot.cycles) / debugger.clockHz))
-            }
-            cell("L:\(workspace.cursorLine) C:\(workspace.cursorColumn)")
-            cell("CAP")
-            cell("NUM")
-            cell("SCRL")
-            cell("OVR")
-            cell("R/W")
+            Spacer(minLength: 0)
+            cell(workspace.project == nil ? "" : "Simulation", width: 220, alignment: .leading)
+            cell(workspace.mode == .debug ? String(format: "t1: %.8f sec", Double(debugger.snapshot.cycles) / debugger.clockHz) : "",
+                 width: 170, alignment: .leading)
+            cell(workspace.activeDocument == nil ? "" : "L:\(workspace.cursorLine) C:\(workspace.cursorColumn)", width: 110, alignment: .leading)
+            cell("CAP", dim: !NSEvent.modifierFlags.contains(.capsLock))
+            cell("NUM", dim: true)
+            cell("SCRL", dim: true)
+            cell("OVR", dim: true)
+            cell("R/W", dim: workspace.activeDocument == nil)
         }
         .font(.system(size: 11))
         .frame(height: 20)
@@ -310,10 +316,13 @@ struct StatusBar: View {
         .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.border), alignment: .top)
     }
 
-    private func cell(_ text: String) -> some View {
+    private func cell(_ text: String, width: CGFloat? = nil, alignment: Alignment = .center, dim: Bool = false) -> some View {
         Text(text)
-            .foregroundColor(text.count <= 4 ? .gray : .black)
-            .padding(.horizontal, 6)
+            .lineLimit(1)
+            .foregroundColor(dim ? .gray : .black)
+            .padding(.horizontal, 4)
+            .frame(width: width, alignment: alignment)
+            .frame(maxHeight: .infinity)
             .overlay(Rectangle().frame(width: 1).foregroundColor(UVColors.border), alignment: .leading)
     }
 }
