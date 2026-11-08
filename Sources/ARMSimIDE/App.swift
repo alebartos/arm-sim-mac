@@ -23,7 +23,10 @@ struct ARMSimApp: App {
         Window("Nested Vectored Interrupt Controller (NVIC)", id: "nvic") { NVICWindow() }
         Window("System Tick Timer (SysTick)", id: "systick") { SysTickWindow() }
         Window("Fault Reports", id: "faults") { FaultReportsWindow() }
-        Window("GPIO Fast Interface", id: "gpio") { GPIOWindow() }
+        WindowGroup("GPIO Fast Interface", id: "gpio", for: Int.self) { $port in GPIOWindow(port: port ?? 2) }
+            .windowResizability(.contentSize)
+        WindowGroup("Timer", id: "timer", for: Int.self) { $index in TimerWindow(index: index ?? 0) }
+            .windowResizability(.contentSize)
         Window("LandTiger Board", id: "landtiger") { LandTigerWindow() }
         Window("Code Coverage", id: "coverage") { CodeCoverageWindow() }
         Window("System Viewer", id: "systemviewer") { SystemViewerView() }
@@ -372,6 +375,22 @@ extension SmokeTest {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6.5 : 2.5)) {
+            // ARMSIM_SHOT_VIEW=gpio<n>|timer<n>: render that peripheral window instead of the main window.
+            if let name = ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] {
+                let index = Int(name.filter(\.isNumber)) ?? 0
+                let view: AnyView = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
+                let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+                host.frame = NSRect(origin: .zero, size: host.fittingSize)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)
+                window.contentView = host
+                host.layoutSubtreeIfNeeded()
+                if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: output)
+                    FileHandle.standardError.write(Data("[shot] \(output.path)\n".utf8))
+                }
+                exit(0)
+            }
             if optionsTab != nil || breakpointsSheet, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
                let view = sheet.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: rep)

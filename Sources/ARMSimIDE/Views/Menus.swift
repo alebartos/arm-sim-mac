@@ -265,7 +265,7 @@ struct PeripheralsMenu: View {
             Button("Flash Accelerator Module") { svd("SYSCON") }
             Button("Pin Connect Block") { svd("PINCONNECT") }
             Menu("GPIO Fast Interface") {
-                ForEach(0..<5) { port in Button("Port \(port)") { openWindow(id: "gpio") } }
+                ForEach(0..<5) { port in Button("Port \(port)") { openWindow(id: "gpio", value: port) } }
             }
             Menu("GPIO Interrupts") {
                 Button("Port 0") { svd("GPIOINT") }
@@ -288,7 +288,7 @@ struct PeripheralsMenu: View {
                 ForEach(0..<3) { n in Button("I2C \(n)") { svd("I2C\(n)") } }
             }
             Menu("Timer") {
-                ForEach(0..<4) { n in Button("Timer \(n)") { svd("TIMER\(n)") } }
+                ForEach(0..<4) { n in Button("Timer \(n)") { openWindow(id: "timer", value: n) } }
             }
             Button("Repetitive Interrupt Timer") { svd("RITIMER") }
             Menu("Pulse Width Modulator") {

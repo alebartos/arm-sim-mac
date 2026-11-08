@@ -2,61 +2,111 @@ import ARMCore
 import SwiftUI
 
 /// Peripherals ▸ GPIO Fast Interface ▸ Port n (µVision LPC17xx simulator dialog).
+/// Peripherals ▸ GPIO Fast Interface ▸ Port n, as µVision: FIOnDIR/MASK/SET/CLR/PIN with their value and
+/// 32 bit boxes in byte groups, then the Pins row (levels on the pins; click to drive an input).
+/// Register boxes write the register while the program is stopped.
 struct GPIOWindow: View {
+    let port: Int
     @ObservedObject var debugger = Workspace.shared.debugger
-    @AppStorage("gpioPort") private var port = 2
+
+    private var base: UInt32 { 0x2009_C000 + UInt32(port) * 0x20 }
 
     var body: some View {
         let s = debugger.snapshot
         let available = debugger.lpc != nil && s.gpioPins.count == 5
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("General Purpose Input/Output \(port) (GPIO \(port)) - Fast Interface").font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Picker("Port", selection: $port) {
-                    ForEach(0..<5, id: \.self) { Text("Port \($0)").tag($0) }
-                }
-                .frame(width: 120)
-            }
+        VStack(alignment: .leading, spacing: 4) {
             if available {
-                bitsRow("FIO\(port)DIR", s.gpioDirection[port], editable: false)
-                bitsRow("FIO\(port)MASK", s.gpioMask[port], editable: false)
-                bitsRow("FIO\(port)SET", s.gpioOutput[port], editable: false)
-                bitsRow("FIO\(port)PIN", s.gpioPins[port] & ~s.gpioMask[port], editable: false)
-                Divider()
-                bitsRow("Pins", s.gpioPins[port], editable: true)
-                Text("Click a Pins bit to toggle the level applied to an input pin (pins configured as outputs show the output latch).")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
+                GroupBox("GPIO\(port)") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        header
+                        bitsRow("FIO\(port)DIR", s.gpioDirection[port], offset: 0x00)
+                        bitsRow("FIO\(port)MASK", s.gpioMask[port], offset: 0x10)
+                        bitsRow("FIO\(port)SET", s.gpioOutput[port], offset: 0x18)
+                        bitsRow("FIO\(port)CLR", 0, offset: 0x1C)
+                        bitsRow("FIO\(port)PIN", s.gpioPins[port] & ~s.gpioMask[port], offset: 0x14)
+                        bitsRow("Pins", s.gpioPins[port], offset: nil)
+                    }
+                    .padding(2)
+                }
             } else {
                 Text("GPIO simulation is available for LPC17xx devices in a debug session.")
                     .foregroundColor(.secondary)
             }
         }
         .font(UVColors.small)
-        .padding(12)
-        .frame(minWidth: 720, minHeight: 230)
+        .padding(10)
+        .fixedSize()
+        .navigationTitle("General Purpose Input/Output \(port) (GPIO \(port)) - Fast Interface")
     }
 
-    private func bitsRow(_ title: String, _ value: UInt32, editable: Bool) -> some View {
-        HStack(spacing: 6) {
-            Text(title).frame(width: 80, alignment: .leading)
-            Text(String(format: "0x%08X", value)).font(UVColors.mono).frame(width: 90, alignment: .leading)
-            HStack(spacing: 1) {
+    private var header: some View {
+        HStack(spacing: 0) {
+            Spacer().frame(width: 160)
+            ForEach([(31, 24), (23, 16), (15, 8), (7, 0)], id: \.0) { high, low in
+                HStack(spacing: 0) {
+                    Text("\(high)"); Spacer(); Text("Bits"); Spacer(); Text("\(low)")
+                }
+                .frame(width: 8 * 13)
+                .padding(.trailing, 6)
+            }
+        }
+        .foregroundColor(.secondary)
+    }
+
+    /// `offset == nil`: the Pins row (input levels).
+    private func bitsRow(_ title: String, _ value: UInt32, offset: UInt32?) -> some View {
+        HStack(spacing: 4) {
+            Text(title + ":").frame(width: 66, alignment: .trailing)
+            HexField(value: value) { newValue in
+                if let offset { debugger.writeMemory(base + offset, size: 4, value: newValue) }
+            }
+            .frame(width: 86)
+            .disabled(offset == nil)
+            HStack(spacing: 0) {
                 ForEach((0..<32).reversed(), id: \.self) { bit in
-                    let on = value & (1 << UInt32(bit)) != 0
+                    let mask = UInt32(1) << UInt32(bit)
+                    let on = value & mask != 0
                     Button {
-                        if editable { debugger.toggleInputPin(port: port, bit: bit) }
+                        if let offset {
+                            // SET/CLR are write-1 registers; the others are read-modify-write.
+                            let write = offset == 0x18 || offset == 0x1C ? mask : value ^ mask
+                            debugger.writeMemory(base + offset, size: 4, value: write)
+                        } else {
+                            debugger.toggleInputPin(port: port, bit: bit)
+                        }
                     } label: {
-                        Image(systemName: on ? "checkmark.square.fill" : "square")
+                        Image(systemName: on ? "checkmark.square" : "square")
                             .font(.system(size: 11))
-                            .foregroundColor(on ? .blue : .gray)
+                            .foregroundColor(on ? .black : .gray)
+                            .frame(width: 13)
                     }
                     .buttonStyle(.plain)
                     .help("Bit \(bit)")
-                    .padding(.trailing, bit % 8 == 0 ? 4 : 0)
+                    .padding(.trailing, bit % 8 == 0 ? 6 : 0)
                 }
             }
+            .disabled(debugger.isRunning && offset != nil)
         }
+    }
+}
+
+/// Hex value box of µVision's peripheral dialogs: shows 0x%08X, Return writes the new value.
+struct HexField: View {
+    let value: UInt32
+    let onCommit: (UInt32) -> Void
+    @LocalState private var text = ""
+    @LocalState private var editing = false
+
+    var body: some View {
+        TextField("", text: Binding(get: { editing ? text : String(format: "0x%08X", value) },
+                                    set: { text = $0; editing = true }))
+            .font(.system(size: 11))
+            .textFieldStyle(.squareBorder)
+            .onSubmit {
+                editing = false
+                let t = text.trimmingCharacters(in: .whitespaces).lowercased()
+                if let v = t.hasPrefix("0x") ? UInt32(t.dropFirst(2), radix: 16) : UInt32(t) { onCommit(v) }
+            }
     }
 }
 
@@ -241,5 +291,133 @@ struct SymbolsPanel: View {
             }
             .listStyle(.plain)
         }
+    }
+}
+
+/// Peripherals ▸ Timer ▸ Timer n, laid out as µVision's dialog: Prescaler, Timer, Interrupt Register,
+/// Match Channels (MCR, EMR, MR0-3), Capture Channels (CCR, CR0-1) and Count Control (CTCR).
+/// Registers are read from the bus; edits write them while the program is stopped.
+struct TimerWindow: View {
+    let index: Int
+    @ObservedObject var debugger = Workspace.shared.debugger
+
+    private var base: UInt32 { [0x4000_4000, 0x4000_8000, 0x4009_0000, 0x4009_4000][min(index, 3)] }
+
+    private func reg(_ offset: UInt32) -> UInt32 {
+        let bytes = debugger.readMemory(base + offset, count: 4)
+        return bytes.enumerated().reduce(0) { $0 | (UInt32($1.element ?? 0) << UInt32(8 * $1.offset)) }
+    }
+
+    private func write(_ offset: UInt32, _ value: UInt32) { debugger.writeMemory(base + offset, size: 4, value: value) }
+
+    private func field(_ title: String, _ offset: UInt32) -> some View {
+        HStack(spacing: 4) {
+            Text(title + ":").fixedSize()
+            HexField(value: reg(offset)) { write(offset, $0) }.frame(width: 86)
+        }
+    }
+
+    /// Checkbox bound to one bit of a register (`clearOnWrite`: IR, written with 1 to clear).
+    private func bit(_ title: String, _ offset: UInt32, _ n: Int, clearOnWrite: Bool = false) -> some View {
+        let value = reg(offset)
+        let mask = UInt32(1) << UInt32(n)
+        return Toggle(title, isOn: Binding(get: { value & mask != 0 },
+                                           set: { _ in write(offset, clearOnWrite ? mask : value ^ mask) }))
+            .fixedSize()
+    }
+
+    private func emc(_ n: Int) -> some View {
+        let emr = reg(0x3C)
+        let shift = UInt32(4 + 2 * n)
+        return HStack(spacing: 4) {
+            Text("EMC\(n):").fixedSize()
+            Picker("", selection: Binding(get: { Int((emr >> shift) & 3) },
+                                          set: { write(0x3C, (emr & ~(3 << shift)) | (UInt32($0) << shift)) })) {
+                Text("Nothing").tag(0); Text("Clear").tag(1); Text("Set").tag(2); Text("Toggle").tag(3)
+            }
+            .labelsHidden().frame(width: 80)
+        }
+    }
+
+    var body: some View {
+        let _ = debugger.revision
+        VStack(alignment: .leading, spacing: 6) {
+            if debugger.lpc == nil {
+                Text("Timer simulation is available for LPC17xx devices in a debug session.").foregroundColor(.secondary)
+            } else {
+                HStack(alignment: .top, spacing: 6) {
+                    GroupBox("Prescaler") {
+                        VStack(alignment: .trailing, spacing: 3) { field("PR", 0x0C); field("PC", 0x10) }.padding(2)
+                    }
+                    GroupBox("Timer") {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .trailing, spacing: 3) { field("TCR", 0x04); field("TC", 0x08) }
+                            VStack(alignment: .leading, spacing: 3) { bit("Enable", 0x04, 0); bit("Reset", 0x04, 1) }
+                        }
+                        .padding(2)
+                    }
+                    GroupBox("Interrupt Register") { field("IR", 0x00).padding(2) }
+                }
+                GroupBox("Match Channels") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 14) { field("MCR", 0x14); field("EMR", 0x3C) }
+                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 2) {
+                            GridRow { ForEach(0..<4, id: \.self) { n in field("MR\(n)", 0x18 + UInt32(4 * n)) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in bit("Interrupt on MR\(n)", 0x14, 3 * n) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in bit("Reset on MR\(n)", 0x14, 3 * n + 1) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in bit("Stop on MR\(n)", 0x14, 3 * n + 2) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in emc(n) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in bit("External Match \(n)", 0x3C, n) } }
+                            GridRow { ForEach(0..<4, id: \.self) { n in bit("MR\(n) Interrupt", 0x00, n, clearOnWrite: true) } }
+                        }
+                    }
+                    .padding(2)
+                }
+                GroupBox("Capture Channels") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        field("CCR", 0x28)
+                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 2) {
+                            GridRow { field("CR0", 0x2C); field("CR1", 0x30) }
+                            GridRow { bit("Rising Edge 0", 0x28, 0); bit("Rising Edge 1", 0x28, 3) }
+                            GridRow { bit("Falling Edge 0", 0x28, 1); bit("Falling Edge 1", 0x28, 4) }
+                            GridRow { bit("Interrupt on Event 0", 0x28, 2); bit("Interrupt on Event 1", 0x28, 5) }
+                            GridRow {
+                                Toggle("CAP\(index).0", isOn: .constant(false)).disabled(true)
+                                Toggle("CAP\(index).1", isOn: .constant(false)).disabled(true)
+                            }
+                            GridRow { bit("CR0 Interrupt", 0x00, 4, clearOnWrite: true); bit("CR1 Interrupt", 0x00, 5, clearOnWrite: true) }
+                        }
+                    }
+                    .padding(2)
+                }
+                GroupBox("Count Control") {
+                    let ctcr = reg(0x70)
+                    HStack(spacing: 12) {
+                        field("CTCR", 0x70)
+                        HStack(spacing: 4) {
+                            Text("Mode:")
+                            Picker("", selection: Binding(get: { Int(ctcr & 3) }, set: { write(0x70, (ctcr & ~3) | UInt32($0)) })) {
+                                Text("Timer").tag(0); Text("Counter (rising)").tag(1)
+                                Text("Counter (falling)").tag(2); Text("Counter (both)").tag(3)
+                            }
+                            .labelsHidden().frame(width: 140)
+                        }
+                        HStack(spacing: 4) {
+                            Text("Counter Input:")
+                            Picker("", selection: Binding(get: { Int((ctcr >> 2) & 3) }, set: { write(0x70, (ctcr & ~0xC) | (UInt32($0) << 2)) })) {
+                                Text("CAP\(index).0").tag(0); Text("CAP\(index).1").tag(1)
+                            }
+                            .labelsHidden().frame(width: 80)
+                        }
+                    }
+                    .padding(2)
+                }
+            }
+        }
+        .font(.system(size: 11))
+        .disabled(debugger.isRunning)
+        .padding(10)
+        .fixedSize()
+        .navigationTitle("Timer \(index)")
     }
 }
