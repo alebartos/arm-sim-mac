@@ -66,6 +66,7 @@ struct GPIOWindow: View {
                 ForEach((0..<32).reversed(), id: \.self) { bit in
                     let mask = UInt32(1) << UInt32(bit)
                     let on = value & mask != 0
+                    let present = LPCGPIO.pinMask[port] & mask != 0
                     Button {
                         if let offset {
                             // SET/CLR are write-1 registers; the others are read-modify-write.
@@ -82,6 +83,9 @@ struct GPIOWindow: View {
                     }
                     .buttonStyle(.plain)
                     .help("Bit \(bit)")
+                    // Pins row: only pins of the package; FIOnPIN: absent pins greyed, as µVision.
+                    .opacity(offset == nil && !present ? 0 : 1)
+                    .disabled(!present && (offset == nil || offset == 0x14))
                     .padding(.trailing, bit % 8 == 0 ? 6 : 0)
                 }
             }

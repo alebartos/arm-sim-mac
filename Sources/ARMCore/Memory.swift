@@ -212,11 +212,19 @@ public final class MemoryMap {
     }
 
     /// Debugger read: returns nil for unmapped bytes. Does not touch MMIO devices.
+    /// Debugger read: memory bytes, and peripheral registers read without side effects (a word at a time,
+    /// as µVision's Memory window shows them); nil where nothing is mapped.
     public func peek(_ address: UInt32, count: Int) -> [UInt8?] {
-        (0..<count).map { i in
+        var word: (address: UInt32, value: UInt32)?
+        return (0..<count).map { i in
             let a = address &+ UInt32(i)
             guard let r = region(containing: a) else { return nil }
-            if case .mmio = r.kind { return nil }
+            if case .mmio(let device) = r.kind {
+                let aligned = a & ~3
+                guard aligned >= r.base, r.contains(aligned, 4) else { return nil }
+                if word?.address != aligned { word = (aligned, device.peek(offset: aligned &- r.base, size: 4)) }
+                return UInt8(truncatingIfNeeded: word!.value >> (8 * (a & 3)))
+            }
             return r.bytes[Int(a &- r.base)]
         }
     }

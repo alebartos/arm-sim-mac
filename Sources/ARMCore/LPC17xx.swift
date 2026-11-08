@@ -138,8 +138,12 @@ public final class LPCGPIO: WordDevice {
     /// Called after every register write (board devices wired to the pins, e.g. the LCD).
     var onWrite: (() -> Void)?
 
+    /// Pins present on the LPC176x 100-pin package (UM10360 chapter 8): P0.0-11/15-30, P1.0/1/4/8-10/14-31,
+    /// P2.0-13, P3.25-26, P4.28-29. Absent pins read 0, as in µVision (FIO2PIN = 0x00003FFF).
+    public static let pinMask: [UInt32] = [0x7FFF_8FFF, 0xFFFF_C713, 0x0000_3FFF, 0x0600_0000, 0x3000_0000]
+
     public func pins(_ port: Int) -> UInt32 {
-        (output[port] & direction[port]) | (input[port] & ~direction[port])
+        ((output[port] & direction[port]) | (input[port] & ~direction[port])) & Self.pinMask[port]
     }
 
     override func readWord(_ offset: UInt32) -> UInt32 {

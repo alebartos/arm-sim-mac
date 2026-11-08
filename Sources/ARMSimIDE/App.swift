@@ -404,6 +404,10 @@ extension SmokeTest {
                 WindowLayout.shared.openLogicAnalyzer()
             }
         }
+        // ARMSIM_SHOT_MEMORY=<address>: Memory 1 address.
+        if let address = ProcessInfo.processInfo.environment["ARMSIM_SHOT_MEMORY"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { UserDefaults.standard.set(address, forKey: "memoryAddress") }
+        }
         // ARMSIM_SHOT_TABS=<left>,<bottom right>: select those dock tabs (e.g. 2,1 = Symbols + Watch 1).
         if let tabs = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TABS"]?.split(separator: ",").compactMap({ Int($0) }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 5.5 : 2)) {
