@@ -48,7 +48,12 @@ public enum Linker {
         var vectors: [Placed] = [], code: [Placed] = [], rodata: [Placed] = [], data: [Placed] = [], bss: [Placed] = []
         var fixed: [(Placed, UInt32)] = []
         for (oi, object) in objects.enumerated() {
-            for (si, s) in object.sections.enumerated() where object.isLoadable(s) && (live?.contains(key(oi, si)) ?? true) {
+            // Empty allocatable sections (e.g. HEAP with Heap_Size 0) are placed too: their labels need an address.
+            let isEmptyAlloc = { (s: ObjectFile.Section) in
+                s.flags & ObjectFile.SHF_ALLOC != 0 && s.size == 0 && s.type != ObjectFile.SHT_ARM_EXIDX
+            }
+            for (si, s) in object.sections.enumerated()
+            where (object.isLoadable(s) || isEmptyAlloc(s)) && (live?.contains(key(oi, si)) ?? true) {
                 let p = Placed(object: oi, section: si)
                 if let address = fixedAddress(of: s.name) {
                     fixed.append((p, address))
@@ -141,7 +146,8 @@ public enum Linker {
             case 0xFFF2: return nil
             default:
                 guard Int(s.sectionIndex) < addresses[object].count else { return nil }
-                guard let base = addresses[object][Int(s.sectionIndex)] else { return s.value }
+                // A section removed as unused (or never placed) has no address: its symbols are not in the image.
+                guard let base = addresses[object][Int(s.sectionIndex)] else { return nil }
                 return base &+ s.value
             }
         }
@@ -211,7 +217,7 @@ public enum Linker {
         for (oi, object) in objects.enumerated() {
             var map: [String: UInt32] = [:]
             for (si, s) in object.sections.enumerated() {
-                guard let address = addresses[oi][si] else { continue }
+                guard let address = addresses[oi][si], s.size > 0 else { continue }
                 if map[s.name] == nil { map[s.name] = address }
                 segments.append(LoadSegment(name: "\(object.name)(\(s.name))", address: address,
                                             bytes: sectionData[oi][si],

@@ -537,6 +537,10 @@ final class Workspace: ObservableObject {
                 self.isBuilding = false
                 self.lastProduct = product
                 guard let product else {
+                    if CommandLine.arguments.contains("--shot") {
+                        FileHandle.standardError.write(Data(("[shot] build failed:\n" + self.buildLog.map(\.text).joined(separator: "\n") + "\n").utf8))
+                        NSApp.terminate(nil)
+                    }
                     NSAlert.show("Cannot start debug session", "The build failed. See the Build Output window.")
                     return
                 }

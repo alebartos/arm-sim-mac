@@ -95,6 +95,20 @@ struct DwarfVariable: Identifiable {
         /// DW_OP_regN: value lives in a register.
         case register(Int)
         case unknown(String)
+        /// DWARF 5 location list (optimized code): where the variable lives for each PC range.
+        case list([ListEntry])
+
+        struct ListEntry: Equatable {
+            let low: UInt32
+            let high: UInt32   // exclusive
+            let location: Location
+        }
+
+        /// The location that applies at `pc` (a list entry, or self).
+        func at(pc: UInt32) -> Location {
+            guard case .list(let entries) = self else { return self }
+            return entries.first { pc >= $0.low && pc < $0.high }?.location ?? .unknown("not available")
+        }
     }
 
     let name: String
@@ -222,8 +236,14 @@ final class DwarfInfo {
         var roots: [DIE] = []
         var stack: [DIE] = []
         var current: DIE?
+        var lastKey: String?
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = Substring(raw)
+            // Location list entries continue the previous attribute: "   [0x0, 0x12): DW_OP_reg0 R0".
+            if let die = current, let key = lastKey, line.drop(while: { $0 == " " }).hasPrefix("[0x") {
+                die.attributes[key, default: ""] += "\n" + line.trimmingCharacters(in: .whitespaces)
+                continue
+            }
             if line.hasPrefix("0x"), let colon = line.firstIndex(of: ":") {
                 let rest = line[line.index(after: colon)...]
                 let indent = rest.prefix { $0 == " " }.count
@@ -245,6 +265,7 @@ final class DwarfInfo {
                 var value = trimmed[trimmed.index(after: tab)...].trimmingCharacters(in: .whitespaces)
                 if value.hasPrefix("(") && value.hasSuffix(")") { value = String(value.dropFirst().dropLast()) }
                 die.attributes[key] = value
+                lastKey = key
             }
         }
         return roots
@@ -335,8 +356,27 @@ final class DwarfInfo {
         }
     }
 
-    private func parseLocation(_ raw: String?) -> DwarfVariable.Location? {
+    private func parseLocation(_ raw: String?, rebase: ((Int) -> UInt32)? = nil) -> DwarfVariable.Location? {
         guard let raw else { return nil }
+        if raw.contains("loclist") {
+            // "(indexed (0x0) loclist = 0x44: \n[0x0, 0x12): DW_OP_reg0 R0\n[...): ...)" (closing paren on the last line).
+            var entries: [DwarfVariable.Location.ListEntry] = []
+            for line in raw.split(separator: "\n").dropFirst() {
+                guard line.hasPrefix("[0x"), let close = line.range(of: "): ") else { continue }
+                let bounds = line[line.index(after: line.startIndex)..<close.lowerBound].split(separator: ",")
+                guard bounds.count == 2,
+                      let low = Int(bounds[0].trimmingCharacters(in: .whitespaces).dropFirst(2), radix: 16),
+                      let high = Int(bounds[1].trimmingCharacters(in: .whitespaces).dropFirst(2), radix: 16) else { continue }
+                var expression = String(line[close.upperBound...])
+                if expression.filter({ $0 == ")" }).count > expression.filter({ $0 == "(" }).count { expression.removeLast() }
+                let location = parseLocation(expression) ?? .unknown("optimized out")
+                let rebaseAddress = rebase ?? { UInt32(truncatingIfNeeded: $0) }
+                entries.append(.init(low: rebaseAddress(low), high: rebaseAddress(high), location: location))
+            }
+            return .list(entries)
+        }
+        // Single operations only: a composite expression ("DW_OP_entry_value(...), DW_OP_stack_value") is unknown.
+        if raw.contains(", ") { return .unknown(raw.hasPrefix("DW_OP_entry_value") ? "optimized out" : raw) }
         let parts = raw.split(separator: " ").map(String.init)
         guard let op = parts.first else { return nil }
         func signed(_ i: Int) -> Int32? { parts.count > i ? Int32(parts[i].replacingOccurrences(of: "+", with: "")) : nil }
@@ -356,10 +396,10 @@ final class DwarfInfo {
     }
 
     private func makeVariable(_ die: DIE, table: TypeTable, function: String?, range: ClosedRange<UInt32>?,
-                              image: ELFImage) -> DwarfVariable? {
+                              image: ELFImage, rebase: ((Int) -> UInt32)? = nil) -> DwarfVariable? {
         guard let name = die.string("DW_AT_name") else { return nil }
         let type = die.reference("DW_AT_type").flatMap { table.types[$0] }
-        var location = parseLocation(die.attributes["DW_AT_location"]) ?? .unknown("optimized out")
+        var location = parseLocation(die.attributes["DW_AT_location"], rebase: rebase) ?? .unknown("optimized out")
         if case .unknown(let what) = location, what == "address" {
             // Globals and statics: use the linked symbol (DWARF addresses in .o are unrelocated).
             let candidates = [name] + (function.map { ["\($0).\(name)", "\(name).\($0)"] } ?? [])
@@ -398,7 +438,9 @@ final class DwarfInfo {
             for child in node.children {
                 switch child.tag {
                 case "DW_TAG_formal_parameter", "DW_TAG_variable":
-                    if let v = makeVariable(child, table: table, function: name, range: range, image: image) { variables.append(v) }
+                    if let v = makeVariable(child, table: table, function: name, range: range, image: image, rebase: absolute) {
+                        variables.append(v)
+                    }
                 case "DW_TAG_lexical_block":
                     var blockRange = range
                     if let bl = child.number("DW_AT_low_pc") {
@@ -420,20 +462,20 @@ final class DwarfInfo {
 
     /// Address of a variable for the given register state (nil for register values).
     func address(of v: DwarfVariable, registers: [UInt32]) -> UInt32? {
-        switch v.location {
+        switch v.location.at(pc: registers.count > 15 ? registers[15] : 0) {
         case .address(let a): return a
         case .frameOffset(let off):
             let reg = v.function.flatMap { name in functions.first { $0.name == name }?.frameBaseRegister } ?? 13
             return registers[reg] &+ UInt32(bitPattern: off)
         case .registerOffset(let reg, let off):
             return reg < registers.count ? registers[reg] &+ UInt32(bitPattern: off) : nil
-        case .register, .unknown: return nil
+        case .register, .unknown, .list: return nil
         }
     }
 
     func value(of v: DwarfVariable, registers: [UInt32], read: (UInt32, Int) -> [UInt8?]) -> ValueNode {
         let typeName = v.type?.displayName ?? "?"
-        switch v.location {
+        switch v.location.at(pc: registers.count > 15 ? registers[15] : 0) {
         case .unknown(let why):
             return ValueNode(id: v.id, name: v.name, typeName: typeName, valueText: "<\(why)>", address: nil, children: [])
         case .register(let reg):

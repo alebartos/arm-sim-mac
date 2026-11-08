@@ -486,6 +486,13 @@ extension SmokeTest {
         }
         if debug { ws.toggleDebugSession() }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2)) {
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_DWARF"] != nil, let dwarf = ws.lastProduct?.dwarf {
+                let pc = ws.debugger.snapshot.r[15]
+                for f in dwarf.functions where f.contains(pc) || f.name == "main" || f.name == "init_timer" {
+                    FileHandle.standardError.write(Data(String(format: "[shot] fn %@ 0x%X-0x%X vars %@\n", f.name, f.low, f.high,
+                                                               f.variables.map(\.name).joined(separator: ",")).utf8))
+                }
+            }
             if let tv = EditorCommands.lastEditor, let sv = tv.enclosingScrollView {
                 FileHandle.standardError.write(Data("[shot] clip \(sv.contentView.frame) bounds \(sv.contentView.bounds) tv \(tv.frame) inset \(tv.textContainerInset) origin \(tv.textContainerOrigin) ruler \(sv.verticalRulerView?.frame ?? .zero)\n".utf8))
             }
