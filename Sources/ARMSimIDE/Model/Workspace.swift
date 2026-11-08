@@ -58,6 +58,7 @@ final class Workspace: ObservableObject {
     /// Set by "New Project…": the device dialog is shown next, then the project is created.
     @Published var pendingNewProject: URL?
     @Published var showGoToLine = false
+    @Published var showBreakpoints = false
     @Published var cursorLine = 1
     @Published var cursorColumn = 1
     @Published var lastProduct: BuildProduct?
@@ -881,6 +882,9 @@ final class Workspace: ObservableObject {
         if disabledBreakpoints.contains(bp) { disabledBreakpoints.remove(bp) } else { disabledBreakpoints.insert(bp) }
         syncBreakpoints()
     }
+
+    /// Re-arm the simulator after enabling/disabling breakpoints from outside (Breakpoints dialog).
+    func refreshBreakpoints() { syncBreakpoints() }
 
     /// Debug ▸ Disable All Breakpoints in current Target.
     func disableAllBreakpoints() {

@@ -363,8 +363,16 @@ extension SmokeTest {
             OptionsDialog.requestedTab = optionsTab
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ws.showOptions = true }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2.5)) {
-            if optionsTab != nil, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
+        // ARMSIM_SHOT_BREAKPOINTS=1: capture Debug ▸ Breakpoints (with --debug).
+        let breakpointsSheet = ProcessInfo.processInfo.environment["ARMSIM_SHOT_BREAKPOINTS"] != nil
+        if breakpointsSheet {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                if ws.breakpoints.isEmpty, let d = ws.activeDocument { ws.toggleBreakpoint(path: d.path, line: 40) }
+                ws.showBreakpoints = true
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6.5 : 2.5)) {
+            if optionsTab != nil || breakpointsSheet, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
                let view = sheet.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: output)

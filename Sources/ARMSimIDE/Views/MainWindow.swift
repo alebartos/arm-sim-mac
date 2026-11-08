@@ -61,6 +61,7 @@ struct MainWindow: View {
             }
         }
         .sheet(isPresented: $findInFiles.showDialog) { FindInFilesDialog() }
+        .sheet(isPresented: $workspace.showBreakpoints) { BreakpointsDialog(workspace: workspace) }
         .sheet(isPresented: $workspace.showGoToLine) {
             GoToLineDialog(maxLine: (workspace.activeDocument?.text.components(separatedBy: "\n").count) ?? 1) { line in
                 if let line, let d = workspace.activeDocument { workspace.reveal(SourceLocation(path: d.path, line: line)) }

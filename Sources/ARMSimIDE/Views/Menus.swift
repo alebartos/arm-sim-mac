@@ -190,7 +190,7 @@ struct DebugMenuItems: View {
         Button("Run to Cursor Line") { ws.runToCursor() }.keyboardShortcut(functionKey(10), modifiers: [.control]).disabled(!stopped)
         Button("Show Next Statement") { ws.showNextStatement() }.disabled(!stopped)
         Divider()
-        Button("Breakpoints…") {}.keyboardShortcut("b", modifiers: [.control]).disabled(true)
+        Button("Breakpoints…") { ws.showBreakpoints = true }.keyboardShortcut("b", modifiers: [.control]).disabled(!debugging)
         Button("Insert/Remove Breakpoint") { ws.toggleBreakpointAtCursor() }.keyboardShortcut(functionKey(9), modifiers: [])
         Button("Enable/Disable Breakpoint") { ws.toggleBreakpointEnabledAtCursor() }.keyboardShortcut(functionKey(9), modifiers: [.control])
         Button("Disable All Breakpoints in current Target") { ws.disableAllBreakpoints() }.disabled(ws.breakpoints.isEmpty)
