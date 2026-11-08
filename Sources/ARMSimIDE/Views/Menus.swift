@@ -41,9 +41,9 @@ struct AppCommands: Commands {
             Button("Clear All Bookmarks") { Bookmarks.shared.clearAll() }.keyboardShortcut(functionKey(2), modifiers: [.control, .shift])
         }
         CommandGroup(replacing: .textEditing) {
-            Button("Find…") { EditorCommands.showFindBar() }.keyboardShortcut("f")
-            Button("Replace…") { EditorCommands.showFindBar(replace: true) }.keyboardShortcut("h", modifiers: [.command, .option])
-            Button("Find in Files…") { FindInFiles.shared.showDialog = true }.keyboardShortcut("f", modifiers: [.command, .shift])
+            Button("Find…") { FindInFiles.shared.openDialog(tab: 1) }.keyboardShortcut("f")
+            Button("Replace…") { FindInFiles.shared.openDialog(tab: 0) }.keyboardShortcut("h", modifiers: [.command, .option])
+            Button("Find in Files…") { FindInFiles.shared.openDialog(tab: 2) }.keyboardShortcut("f", modifiers: [.command, .shift])
             Button("Incremental Find") { EditorCommands.showFindBar(incremental: true) }.keyboardShortcut("i", modifiers: [.control])
             Divider()
             Menu("Outlining") {

@@ -375,6 +375,11 @@ extension SmokeTest {
             ConfigurationDialog.requestedTab = configTab
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ws.showConfiguration = true }
         }
+        // ARMSIM_SHOT_FIND=<tab 0-2>: capture the Replace / Find / Find in Files dialog.
+        let findTab = ProcessInfo.processInfo.environment["ARMSIM_SHOT_FIND"].flatMap(Int.init)
+        if let findTab {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { FindInFiles.shared.openDialog(tab: findTab) }
+        }
         // ARMSIM_SHOT_MANAGE=1: capture Project ▸ Manage ▸ Project Items.
         let manageSheet = ProcessInfo.processInfo.environment["ARMSIM_SHOT_MANAGE"] != nil
         if manageSheet {
@@ -428,7 +433,7 @@ extension SmokeTest {
                 }
                 exit(0)
             }
-            if optionsTab != nil || breakpointsSheet || manageSheet || configTab != nil, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
+            if optionsTab != nil || breakpointsSheet || manageSheet || configTab != nil || findTab != nil, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
                let view = sheet.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: output)

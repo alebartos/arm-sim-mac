@@ -78,6 +78,51 @@ enum EditorCommands {
         view.showFindIndicator(for: match)
     }
 
+    /// Find dialog ▸ Find Next: next (or previous) match after the selection, wrapping around. Returns false if none.
+    @discardableResult
+    static func findNext(_ options: FindOptions, up: Bool = false) -> Bool {
+        guard let view = textView, let regex = try? FindEngine.makeRegex(options) else { NSSound.beep(); return false }
+        let text = view.string as NSString
+        let selection = view.selectedRange()
+        let matches = regex.matches(in: view.string, range: NSRange(location: 0, length: text.length)).map(\.range)
+            .filter { $0.length > 0 }
+        let match = up
+            ? (matches.last { $0.location < selection.location } ?? matches.last)
+            : (matches.first { $0.location >= selection.location + max(selection.length, 0) && $0 != selection } ?? matches.first)
+        guard let match else { NSSound.beep(); return false }
+        view.setSelectedRange(match)
+        view.scrollRangeToVisible(match)
+        view.showFindIndicator(for: match)
+        return true
+    }
+
+    /// Replace tab ▸ Replace: replace the selection when it is a match, then find the next one.
+    static func replaceNext(_ options: FindOptions, with replacement: String) {
+        guard let view = textView, let regex = try? FindEngine.makeRegex(options) else { NSSound.beep(); return }
+        let selection = view.selectedRange()
+        let selected = (view.string as NSString).substring(with: selection)
+        if selection.length > 0, let m = regex.firstMatch(in: selected, range: NSRange(location: 0, length: (selected as NSString).length)),
+           m.range.length == selection.length {
+            let text = options.regularExpression
+                ? regex.replacementString(for: m, in: selected, offset: 0, template: replacement) : replacement
+            replace(selection, in: view, with: text)
+            view.setSelectedRange(NSRange(location: selection.location + (text as NSString).length, length: 0))
+        }
+        findNext(options)
+    }
+
+    /// Replace tab ▸ Replace All in the current file. Returns the number of replacements.
+    @discardableResult
+    static func replaceAll(_ options: FindOptions, with replacement: String) -> Int {
+        guard let view = textView, let regex = try? FindEngine.makeRegex(options) else { NSSound.beep(); return 0 }
+        let full = NSRange(location: 0, length: (view.string as NSString).length)
+        let count = regex.numberOfMatches(in: view.string, range: full)
+        guard count > 0 else { NSSound.beep(); return 0 }
+        let template = options.regularExpression ? replacement : NSRegularExpression.escapedTemplate(for: replacement)
+        replace(full, in: view, with: regex.stringByReplacingMatches(in: view.string, range: full, withTemplate: template))
+        return count
+    }
+
     /// Find… (Ctrl+F), Replace… (Ctrl+H) and Incremental Find (Ctrl+I): the editor's find bar.
     static func showFindBar(incremental: Bool = false, replace: Bool = false) {
         guard let view = textView else { return }

@@ -20,7 +20,9 @@ struct FindOptions: Equatable {
     var wholeWord = false
     var regularExpression = false
     /// File type filter, µVision style: "*.c;*.s;*.h" (empty = all files).
-    var fileTypes = "*.c;*.h;*.s;*.S;*.asm;*.inc"
+    var fileTypes = FindOptions.defaultFileTypes
+
+    static let defaultFileTypes = "*.c;*.cpp;*.cxx;*.cc;*.h;*.hpp;*.hxx;*.hh;*.asm;*.s;*.S;*.inc"
 }
 
 enum FindScope: Int, CaseIterable {
@@ -175,6 +177,21 @@ final class FindInFiles: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var status = ""
     @Published var showDialog = false
+    /// Tab of the µVision find dialog: 0 Replace, 1 Find, 2 Find in Files.
+    @Published var dialogTab = 2
+    @Published var replaceText = ""
+    @Published var searchUp = false
+
+    func addToHistory(_ text: String) {
+        history.removeAll { $0 == text }
+        history.insert(text, at: 0)
+        if history.count > 20 { history.removeLast() }
+    }
+
+    func openDialog(tab: Int) {
+        dialogTab = tab
+        showDialog = true
+    }
     @Published var showResults = false
     /// Recently searched strings (most recent first).
     @Published private(set) var history: [String] = []

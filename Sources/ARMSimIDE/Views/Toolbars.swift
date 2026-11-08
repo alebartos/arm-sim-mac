@@ -83,7 +83,7 @@ struct FileToolbar: View {
             ToolButton(icon: "text.line.last.and.arrowtriangle.forward", help: "Uncomment Selection", enabled: editing) { EditorCommands.uncomment() }
             ToolbarDivider()
             ToolButton(icon: "folder.badge.questionmark", help: "Find in Files… (⇧⌘F)", tint: Color(red: 0.75, green: 0.55, blue: 0.1)) {
-                FindInFiles.shared.showDialog = true
+                FindInFiles.shared.openDialog(tab: 2)
             }
             FindBox(text: $findText, history: $findHistory) { EditorCommands.find($0) }
                 .frame(width: 180)

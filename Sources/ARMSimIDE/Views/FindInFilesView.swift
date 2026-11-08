@@ -34,81 +34,186 @@ extension FindInFiles {
     }
 }
 
-// MARK: - Dialog (Edit ▸ Find in Files…)
+// MARK: - Dialog (Edit ▸ Replace… / Find… / Find in Files…)
 
+/// µVision's find dialog: Replace, Find and Find in Files tabs sharing "Find what" and the find options.
 struct FindInFilesDialog: View {
     @ObservedObject var finder = FindInFiles.shared
     @ObservedObject var workspace = Workspace.shared
     @Environment(\.dismiss) private var dismiss
+    @LocalState private var message = ""
+
+    private let tabs = ["Replace", "Find", "Find in Files"]
+    private static let typeChoices = [FindOptions.defaultFileTypes, "*.c;*.h", "*.s;*.S;*.asm;*.inc", "*.*"]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Find in Files").font(.system(size: 13, weight: .semibold))
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
-                GridRow {
-                    Text("Find what:")
-                    HStack(spacing: 4) {
-                        TextField("", text: $finder.options.text).textFieldStyle(.roundedBorder)
-                        if !finder.history.isEmpty {
-                            Menu {
-                                ForEach(finder.history, id: \.self) { item in
-                                    Button(item) { finder.options.text = item }
-                                }
-                            } label: { Image(systemName: "clock.arrow.circlepath") }
-                            .menuStyle(.borderlessButton).frame(width: 28)
-                        }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(Array(tabs.enumerated()), id: \.offset) { index, title in
+                    Button { finder.dialogTab = index; message = "" } label: {
+                        Text(title).font(.system(size: 11))
+                            .padding(.horizontal, 6).frame(height: 21)
+                            .background(finder.dialogTab == index ? Color.white : UVColors.chrome)
+                            .overlay(Rectangle().stroke(UVColors.border, lineWidth: 0.5))
                     }
+                    .buttonStyle(.plain)
                 }
-                GridRow {
-                    Text("File types:")
-                    TextField("*.c;*.h;*.s", text: $finder.options.fileTypes).textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text("Look in:")
-                    HStack {
-                        Picker("", selection: $finder.scope) {
-                            ForEach(FindScope.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }
-                        .labelsHidden().frame(width: 160)
-                        if finder.scope == .chosenFolder {
-                            TextField("Folder", text: $finder.folderPath).textFieldStyle(.roundedBorder)
-                            Button("…") { chooseFolder() }
-                        }
-                    }
-                }
-            }
-            GroupBox("Find options") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Match case", isOn: $finder.options.matchCase)
-                    Toggle("Match whole word", isOn: $finder.options.wholeWord)
-                    Toggle("Use regular expressions", isOn: $finder.options.regularExpression)
-                    Toggle("Look in subfolders", isOn: $finder.includeSubfolders)
-                        .disabled(finder.scope == .currentProject)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(4)
-            }
-            if !finder.status.isEmpty && !finder.isSearching {
-                Text(finder.status).foregroundColor(.secondary).lineLimit(2)
-            }
-            HStack {
                 Spacer()
-                Button("Find") {
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Find what:")
+                        combo($finder.options.text, choices: finder.history)
+                        regexHelper
+                    }
+                    if finder.dialogTab == 0 {
+                        GridRow {
+                            Text("Replace with:")
+                            combo($finder.replaceText, choices: [])
+                        }
+                    }
+                    if finder.dialogTab == 2 {
+                        GridRow {
+                            Text("File types:")
+                            combo($finder.options.fileTypes, choices: Self.typeChoices)
+                        }
+                        GridRow {
+                            Text("Look in:")
+                            HStack(spacing: 4) {
+                                Picker("", selection: $finder.scope) {
+                                    ForEach(FindScope.allCases, id: \.self) { Text($0.title).tag($0) }
+                                }
+                                .labelsHidden()
+                                if finder.scope == .chosenFolder {
+                                    TextField("Folder", text: $finder.folderPath).textFieldStyle(.squareBorder)
+                                }
+                            }
+                            Button("...") { chooseFolder() }.controlSize(.small)
+                        }
+                        GridRow {
+                            Color.clear.frame(width: 1, height: 1)
+                            Toggle("Include sub-folders", isOn: $finder.includeSubfolders)
+                                .disabled(finder.scope == .currentProject)
+                        }
+                    }
+                }
+                GroupBox("Find options") {
+                    Grid(alignment: .leading, horizontalSpacing: 40, verticalSpacing: 4) {
+                        GridRow {
+                            Toggle("Match case", isOn: $finder.options.matchCase)
+                            Toggle("Regular expression", isOn: $finder.options.regularExpression)
+                        }
+                        GridRow {
+                            Toggle("Match whole word", isOn: $finder.options.wholeWord)
+                            if finder.dialogTab != 2 { Toggle("Search up", isOn: $finder.searchUp) }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(4)
+                }
+                .frame(width: 340)
+                if !message.isEmpty {
+                    Text(message).foregroundColor(.secondary).lineLimit(2)
+                } else if finder.dialogTab == 2 && !finder.status.isEmpty && !finder.isSearching {
+                    Text(finder.status).foregroundColor(.secondary).lineLimit(2)
+                }
+                HStack {
+                    Spacer()
+                    actionButtons.disabled(finder.options.text.isEmpty)
+                    Spacer()
+                    Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+                    Button("Help") {}.disabled(true)
+                }
+            }
+            .padding(12)
+            .frame(width: 400, alignment: .topLeading)
+            .background(Color.white)
+            .border(UVColors.border, width: 0.5)
+        }
+        .font(.system(size: 11))
+        .toggleStyle(.checkbox)
+        .padding(10)
+        .navigationTitle("µVision")
+        .onAppear(perform: seed)
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        HStack {
+            switch finder.dialogTab {
+            case 0:
+                Button("Find Next") { remember(); EditorCommands.findNext(finder.options, up: finder.searchUp) }
+                    .keyboardShortcut(.defaultAction)
+                Button("Replace") { remember(); EditorCommands.replaceNext(finder.options, with: finder.replaceText) }
+                Button("Replace All") {
+                    remember()
+                    let n = EditorCommands.replaceAll(finder.options, with: finder.replaceText)
+                    message = "\(n) occurrence(s) replaced."
+                }
+            case 1:
+                Button("Find Next") { remember(); EditorCommands.findNext(finder.options, up: finder.searchUp) }
+                    .keyboardShortcut(.defaultAction)
+            default:
+                Button("Find All") {
                     let files = finder.collectFiles(workspace: workspace)
                     finder.start(files: files)
                     if finder.isSearching { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(finder.options.text.isEmpty)
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             }
         }
-        .font(.system(size: 11))
-        .padding(14)
-        .frame(width: 480)
-        .onAppear {
-            if finder.folderPath.isEmpty { finder.folderPath = workspace.projectDirectory?.path ?? "" }
+    }
+
+    private func seed() {
+        if finder.folderPath.isEmpty { finder.folderPath = workspace.projectDirectory?.path ?? "" }
+        // Like µVision, Find what starts with the selected text (or the word at the caret).
+        guard let view = EditorCommands.textView else { return }
+        let text = view.string as NSString
+        var range = view.selectedRange()
+        if range.length == 0, range.location <= text.length {
+            let word = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+            var start = range.location, end = range.location
+            while start > 0, let u = UnicodeScalar(text.character(at: start - 1)), word.contains(u) { start -= 1 }
+            while end < text.length, let u = UnicodeScalar(text.character(at: end)), word.contains(u) { end += 1 }
+            range = NSRange(location: start, length: end - start)
         }
+        let seed = range.length > 0 ? text.substring(with: range) : ""
+        if !seed.isEmpty && !seed.contains("\n") { finder.options.text = seed }
+    }
+
+    /// Editable text with a drop-down of earlier entries (µVision combo box).
+    private func combo(_ text: Binding<String>, choices: [String]) -> some View {
+        HStack(spacing: 0) {
+            TextField("", text: text).textFieldStyle(.squareBorder)
+            Menu {
+                ForEach(choices, id: \.self) { item in Button(item) { text.wrappedValue = item } }
+            } label: { Image(systemName: "chevron.down") }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 18)
+            .disabled(choices.isEmpty)
+        }
+        .frame(width: 260)
+    }
+
+    /// The ">" button next to Find what: regular expression building blocks.
+    private var regexHelper: some View {
+        Menu {
+            ForEach([(".", "Any single character"), ("*", "Zero or more"), ("+", "One or more"), ("^", "Beginning of line"),
+                     ("$", "End of line"), ("[ ]", "Character in range"), ("[^ ]", "Character not in range"), ("\\b", "Word boundary")],
+                    id: \.0) { token, title in
+                Button("\(token)\t\(title)") {
+                    finder.options.text += token.replacingOccurrences(of: " ", with: "")
+                    finder.options.regularExpression = true
+                }
+            }
+        } label: { Image(systemName: "chevron.right") }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 18)
+    }
+
+    private func remember() {
+        let text = finder.options.text
+        guard !text.isEmpty, !finder.history.contains(text) else { return }
+        finder.addToHistory(text)
     }
 
     private func chooseFolder() {
@@ -116,7 +221,10 @@ struct FindInFilesDialog: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.directoryURL = URL(fileURLWithPath: finder.folderPath.isEmpty ? NSHomeDirectory() : finder.folderPath)
-        if panel.runModal() == .OK, let url = panel.url { finder.folderPath = url.path }
+        if panel.runModal() == .OK, let url = panel.url {
+            finder.folderPath = url.path
+            finder.scope = .chosenFolder
+        }
     }
 }
 
