@@ -21,20 +21,31 @@ struct ARMSimApp: App {
         .commands { AppCommands() }
 
         Window("Nested Vectored Interrupt Controller (NVIC)", id: "nvic") { NVICWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("System Tick Timer (SysTick)", id: "systick") { SysTickWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("Fault Reports", id: "faults") { FaultReportsWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
             .windowResizability(.contentSize)
         Window("Pin Connect Block", id: "pinconnect") { PinConnectWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
             .windowResizability(.contentSize)
         WindowGroup("GPIO Fast Interface", id: "gpio", for: Int.self) { $port in GPIOWindow(port: port ?? 2) }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
             .windowResizability(.contentSize)
         WindowGroup("Timer", id: "timer", for: Int.self) { $index in TimerWindow(index: index ?? 0) }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
             .windowResizability(.contentSize)
         Window("LandTiger Board", id: "landtiger") { LandTigerWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("Code Coverage", id: "coverage") { CodeCoverageWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("System Viewer", id: "systemviewer") { SystemViewerView() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("Pack Installer", id: "packs") { PackInstallerView() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
         Window("Toolbox", id: "toolbox") { ToolboxWindow() }
+            .commandsRemoved()   // µVision lists only the editor documents in the Window menu
             .windowResizability(.contentSize)
     }
 }

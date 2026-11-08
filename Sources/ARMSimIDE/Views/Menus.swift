@@ -113,10 +113,24 @@ struct AppCommands: Commands {
             Button("Split") {}.disabled(true)
             Button("Close All") { ws.documents.map(\.id).forEach(ws.closeDocument) }
             Divider()
+            WindowDocumentItems()
         }
 
         // MARK: Help
         CommandGroup(replacing: .help) { HelpMenuItems() }
+    }
+}
+
+/// Window menu: the open editor documents, numbered with their full path, the active one checked (µVision).
+struct WindowDocumentItems: View {
+    @ObservedObject var ws = Workspace.shared
+
+    var body: some View {
+        ForEach(Array(ws.documents.enumerated()), id: \.element.id) { index, document in
+            Toggle("\(index + 1) \(document.path)", isOn: Binding(get: { ws.activeDocumentID == document.id },
+                                                                set: { _ in ws.activeDocumentID = document.id }))
+        }
+        if !ws.documents.isEmpty { Divider() }
     }
 }
 
