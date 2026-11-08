@@ -46,10 +46,13 @@ struct OptionsDialog: View {
                 case 0: deviceTab
                 case 1: targetTab
                 case 2: outputTab
+                case 3: listingTab
+                case 4: userTab
                 case 5: cTab
                 case 6: asmTab
                 case 7: linkerTab
                 case 8: debugTab
+                case 9: utilitiesTab
                 default:
                     Text("Not used by the simulator yet.").foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -124,22 +127,6 @@ struct OptionsDialog: View {
         workspace.saveProject()
     }
 
-    private var deviceTab: some View {
-        let device = DeviceInfo.forTarget(options)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Device:").bold()
-                Text("\(device.vendor) \(device.name)")
-                Spacer()
-                Button("Select Device…") { showDevices = true }
-            }
-            Text("Core: \(device.core)")
-            Text(device.summary).foregroundColor(.secondary)
-            Divider()
-            Text("Software Pack: \(options.packID ?? "built-in device (no pack)")")
-            Text("SVD File: \(options.svdPath ?? "-")").foregroundColor(.secondary).lineLimit(2)
-        }
-    }
 
     /// Target tab laid out as µVision's: device and clock, OS and SVD file on the left, Code Generation on the
     /// right, then the Read/Only and Read/Write memory area grids (off-chip ROM1-3/RAM1-3, on-chip IROM1-2/IRAM1-2).
@@ -237,78 +224,291 @@ struct OptionsDialog: View {
         .padding(4)
     }
 
+    // MARK: Output / Listing / User
+
+    private var objectsFolder: String { ".\\" + (options.outputDirectory ?? "Objects") }
+    private var listingsFolder: String { (options.outputDirectory ?? "Objects").hasPrefix("ARMSim_") ? ".\\ARMSim_Listings" : ".\\Listings" }
+
     private var outputTab: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
+                Button("Select Folder for Objects…") {}.disabled(true).frame(width: 220)
+                Spacer()
                 Text("Name of Executable:")
-                TextField("", text: $options.outputName).frame(width: 200).textFieldStyle(.roundedBorder)
+                TextField("", text: $options.outputName).frame(width: 210).textFieldStyle(.roundedBorder)
             }
-            Toggle("Debug Information", isOn: .constant(true)).disabled(true)
-            Toggle("Create Executable: .\\Objects\\\(options.outputName).axf", isOn: .constant(true)).disabled(true)
-            Text("Objects are written to the Objects folder next to the project file.").foregroundColor(.secondary)
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        radio(true, "Create Executable:  \(objectsFolder)\\\(options.outputName)")
+                        Spacer()
+                        Toggle("Create Batch File", isOn: .constant(false)).disabled(true)
+                    }
+                    Toggle("Debug Information", isOn: .constant(true)).disabled(true).padding(.leading, 18)
+                    Toggle("Create HEX File", isOn: .constant(false)).disabled(true).padding(.leading, 18)
+                    Toggle("Browse Information", isOn: .constant(false)).disabled(true).padding(.leading, 18)
+                    radio(false, "Create Library:  \(objectsFolder)\\\(options.outputName).lib").foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(4)
+            }
+        }
+    }
+
+    private var listingTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button("Select Folder for Listings…") {}.disabled(true).frame(width: 220)
+                Spacer()
+                Text("Page Width:"); TextField("", text: .constant("79")).frame(width: 40).disabled(true)
+                Text("Page Length:"); TextField("", text: .constant("66")).frame(width: 40).disabled(true)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Assembler Listing:  \(listingsFolder)\\*.lst", isOn: .constant(true)).disabled(true)
+                    Toggle("Cross Reference", isOn: .constant(true)).disabled(true).padding(.leading, 18)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("C Compiler Listing:  \(listingsFolder)\\*.txt", isOn: .constant(false)).disabled(true)
+                    Toggle("C Preprocessor Listing:  \(listingsFolder)\\*.i", isOn: .constant(false)).disabled(true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Linker Listing:  \(listingsFolder)\\\(options.outputName).map", isOn: .constant(true)).disabled(true)
+                    Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 4) {
+                        GridRow {
+                            Toggle("Memory Map", isOn: .constant(true)); Toggle("Symbols", isOn: .constant(true))
+                            Toggle("Size Info", isOn: .constant(true))
+                        }
+                        GridRow {
+                            Toggle("Callgraph", isOn: .constant(false)); Toggle("Cross Reference", isOn: .constant(true))
+                            Toggle("Totals Info", isOn: .constant(true))
+                        }
+                        GridRow { Text(""); Text(""); Toggle("Unused Sections Info", isOn: .constant(true)) }
+                        GridRow { Text(""); Text(""); Toggle("Veneers Info", isOn: .constant(false)) }
+                    }
+                    .disabled(true)
+                    .padding(.leading, 18)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
+        }
+    }
+
+    private var userTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 4) {
+                GridRow {
+                    Text("Command Items").bold(); Text("User Command").bold(); Text("Stop on Exit Code").bold()
+                }
+                ForEach(["Before Compile C/C++ File", "Before Build/Rebuild", "After Build/Rebuild"], id: \.self) { section in
+                    GridRow { Text(section); Text(""); Text("") }
+                    ForEach(1...2, id: \.self) { n in
+                        GridRow {
+                            Toggle("Run #\(n)", isOn: .constant(false)).padding(.leading, 16)
+                            TextField("", text: .constant("")).frame(width: 330)
+                            Text("Not Specified").foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .disabled(true)
+            .padding(6)
+            .background(Color.white)
+            .border(UVColors.border, width: 0.5)
+            HStack(spacing: 30) {
+                Toggle("Run 'After-Build' Conditionally", isOn: .constant(false))
+                Toggle("Beep When Complete", isOn: .constant(false))
+                Toggle("Start Debugging", isOn: .constant(false))
+            }
+            .disabled(true)
+            Text("User commands are not run by ARM Sim yet.").foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: C/C++ (AC6) / Asm / Linker
+
+    private func controlString(_ title: String, _ text: String) -> some View {
+        HStack(alignment: .top) {
+            Text(title).multilineTextAlignment(.trailing).frame(width: 70, alignment: .trailing)
+            ScrollView {
+                Text(text).font(.system(size: 11)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(3)
+            }
+            .frame(height: 48)
+            .background(UVColors.chrome)
+            .border(UVColors.border, width: 0.5)
+        }
+    }
+
+    private func pathsAndMisc(_ paths: Binding<String>?, misc: Binding<String>) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
+            GridRow {
+                Text("Include\nPaths").multilineTextAlignment(.trailing).frame(width: 70, alignment: .trailing)
+                TextField("", text: paths ?? $options.includePaths).textFieldStyle(.roundedBorder)
+                    .disabled(paths == nil)
+            }
+            GridRow {
+                Text("Misc\nControls").multilineTextAlignment(.trailing).frame(width: 70, alignment: .trailing)
+                TextField("", text: misc).textFieldStyle(.roundedBorder)
+            }
         }
     }
 
     private var cTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let optimizations: [(String, String)] = [("-O0", "-O0"), ("-O1", "-O1"), ("-O2", "-O2"), ("-O3", "-O3"), ("-Ofast", "-Ofast"),
+                                                 ("-Os", "-Os balanced"), ("-Oz", "-Oz image size")]
+        let languages = ["c90", "gnu90", "c99", "gnu99", "c11", "gnu11"]
+        let device = DeviceInfo.forTarget(options)
+        let command = (["-xc", "-std=\(options.cStandard ?? "gnu11")"] + device.clangTarget(fpu: options.useFPU == true && device.hasFPU)
+            + ["-c", "-g", options.optimization, "-funsigned-char", "-fshort-enums", "-fshort-wchar"]
+            + options.defines.split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" }).map { "-D\($0)" }
+            + options.includePaths.split(separator: ";").map { "-I \($0)" }).joined(separator: " ")
+        return VStack(alignment: .leading, spacing: 8) {
             GroupBox("Preprocessor Symbols") {
-                HStack {
-                    Text("Define:")
-                    TextField("e.g. DEBUG, USE_LED=1", text: $options.defines).textFieldStyle(.roundedBorder)
+                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                    GridRow { Text("Define:"); TextField("", text: $options.defines).textFieldStyle(.roundedBorder) }
+                    GridRow { Text("Undefine:"); TextField("", text: .constant("")).textFieldStyle(.roundedBorder).disabled(true) }
                 }
                 .padding(4)
             }
             GroupBox("Language / Code Generation") {
-                HStack {
-                    Text("Optimization:")
-                    Picker("", selection: $options.optimization) {
-                        Text("-O0").tag("-O0")
-                        Text("-O1").tag("-O1")
-                        Text("-O2").tag("-O2")
-                        Text("-O3").tag("-O3")
-                        Text("-Os balanced").tag("-Os")
-                        Text("-Oz image size").tag("-Oz")
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                    GridRow {
+                        Toggle("Execute-only Code", isOn: .constant(false)).disabled(true)
+                        HStack { Text("Warnings:"); Picker("", selection: .constant(0)) { Text("<unspecified>").tag(0) }.labelsHidden().disabled(true) }
+                        HStack {
+                            Text("Language C:")
+                            Picker("", selection: Binding(get: { options.cStandard ?? "gnu11" }, set: { options.cStandard = $0 })) {
+                                ForEach(languages, id: \.self) { Text($0).tag($0) }
+                            }
+                            .labelsHidden()
+                        }
                     }
-                    .labelsHidden().frame(width: 150)
-                    Spacer()
+                    GridRow {
+                        HStack {
+                            Text("Optimization:")
+                            Picker("", selection: $options.optimization) {
+                                ForEach(optimizations, id: \.0) { Text($0.1).tag($0.0) }
+                            }
+                            .labelsHidden()
+                        }
+                        Toggle("Turn Warnings into Errors", isOn: .constant(false)).disabled(true)
+                        HStack { Text("Language C++:"); Picker("", selection: .constant(0)) { Text("c++11").tag(0) }.labelsHidden().disabled(true) }
+                    }
+                    GridRow {
+                        Toggle("Link-Time Optimization", isOn: .constant(false)).disabled(true)
+                        Toggle("Plain Char is Signed", isOn: .constant(false)).disabled(true)
+                        Toggle("Short enums/wchar", isOn: .constant(true)).disabled(true)
+                    }
+                    GridRow {
+                        Toggle("Split Load and Store Multiple", isOn: .constant(false)).disabled(true)
+                        Toggle("Read-Only Position Independent", isOn: .constant(false)).disabled(true)
+                        Toggle("use RTTI", isOn: .constant(false)).disabled(true)
+                    }
+                    GridRow {
+                        Toggle("One ELF Section per Function", isOn: .constant(false)).disabled(true)
+                        Toggle("Read-Write Position Independent", isOn: .constant(false)).disabled(true)
+                        Toggle("No Auto Includes", isOn: .constant(false)).disabled(true)
+                    }
                 }
                 .padding(4)
             }
-            HStack {
-                Text("Include Paths:")
-                TextField("relative to the project, separated by ;", text: $options.includePaths).textFieldStyle(.roundedBorder)
-            }
-            HStack {
-                Text("Misc Controls:")
-                TextField("", text: $options.cMiscFlags).textFieldStyle(.roundedBorder)
-            }
-            Text("Compiler control string: clang \(DeviceInfo.forTarget(options).clangTarget.joined(separator: " ")) -mthumb -g \(options.optimization) -ffreestanding")
-                .font(UVColors.mono).foregroundColor(.secondary).lineLimit(2)
+            pathsAndMisc($options.includePaths, misc: $options.cMiscFlags)
+            controlString("Compiler\ncontrol\nstring", command)
         }
     }
 
     private var asmTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Misc Controls:")
-                TextField("", text: $options.asmMiscFlags).textFieldStyle(.roundedBorder)
+        let device = DeviceInfo.forTarget(options)
+        let command = (["--cpu", device.core, "-g"]
+            + (options.asmDefines ?? "").split(whereSeparator: { $0 == "," || $0 == " " || $0 == ";" }).map { "--pd \"\($0) SETA 1\"" }
+            + options.includePaths.split(separator: ";").map { "-I \($0)" }).joined(separator: " ")
+        return VStack(alignment: .leading, spacing: 8) {
+            GroupBox("Conditional Assembly Control Symbols") {
+                Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                    GridRow {
+                        Text("Define:")
+                        TextField("", text: Binding(get: { options.asmDefines ?? "" }, set: { options.asmDefines = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow { Text("Undefine:"); TextField("", text: .constant("")).textFieldStyle(.roundedBorder).disabled(true) }
+                }
+                .padding(4)
             }
-            Text("Assembler: GNU syntax via clang's integrated assembler (.s; .S files are preprocessed). Keil armasm syntax (AREA, EXPORT, DCD) is not supported yet.")
-                .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            GroupBox("Language / Code Generation") {
+                Grid(alignment: .leading, horizontalSpacing: 40, verticalSpacing: 5) {
+                    GridRow {
+                        HStack { Text("Assembler Option:"); Picker("", selection: .constant(0)) { Text("armasm (Arm Syntax)").tag(0) }.labelsHidden() }
+                        Text("")
+                    }
+                    GridRow {
+                        Toggle("Read-Only Position Independent", isOn: .constant(false)).disabled(true)
+                        Toggle("Split Load and Store Multiple", isOn: .constant(false)).disabled(true)
+                    }
+                    GridRow { Toggle("Read-Write Position Independent", isOn: .constant(false)).disabled(true); Text("") }
+                    GridRow { Toggle("Thumb Mode", isOn: .constant(false)).disabled(true); Text("") }
+                    GridRow {
+                        Toggle("No Warnings", isOn: .constant(false)).disabled(true)
+                        Toggle("No Auto Includes", isOn: .constant(false)).disabled(true)
+                    }
+                }
+                .padding(4)
+            }
+            pathsAndMisc(nil, misc: $options.asmMiscFlags)
+            controlString("Assembler\ncontrol\nstring", command)
         }
     }
 
     private var linkerTab: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Use Memory Layout from Target Dialog", isOn: .constant(true)).disabled(true)
-            Text(String(format: "R/O Base: 0x%08X", parse(romBase, options.romBase))).font(UVColors.mono)
-            Text(String(format: "R/W Base: 0x%08X", parse(ramBase, options.ramBase))).font(UVColors.mono)
-            Text("Linker-defined symbols: __initial_sp, _estack, __data_start__, __data_end__, __bss_start__, __bss_end__, __etext, __HeapBase, __HeapLimit")
-                .foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("Run-time library: memcpy/memset, AEABI division and 64-bit helpers are linked automatically (weak).")
-                .foregroundColor(.secondary)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Use Memory Layout from Target Dialog", isOn: .constant(true))
+                    Group {
+                        Toggle("Make RW Sections Position Independent", isOn: .constant(false))
+                        Toggle("Make RO Sections Position Independent", isOn: .constant(false))
+                        Toggle("Don't Search Standard Libraries", isOn: .constant(false))
+                        Toggle("Report 'might fail' Conditions as Errors", isOn: .constant(true))
+                    }
+                    .padding(.leading, 18)
+                }
+                .disabled(true)
+                Spacer()
+                Grid(alignment: .trailing, horizontalSpacing: 6, verticalSpacing: 6) {
+                    GridRow { Text("X/O Base:"); TextField("", text: .constant("")).frame(width: 150).disabled(true) }
+                    GridRow {
+                        Text("R/O Base:")
+                        TextField("", text: .constant(String(format: "0x%08X", parse(romBase, options.romBase)))).frame(width: 150).disabled(true)
+                    }
+                    GridRow {
+                        Text("R/W Base:")
+                        TextField("", text: .constant(String(format: "0x%08X", parse(ramBase, options.ramBase)))).frame(width: 150).disabled(true)
+                    }
+                    GridRow { Text("disable Warnings:"); TextField("", text: .constant("")).frame(width: 150).disabled(true) }
+                }
+            }
+            Spacer().frame(height: 40)
+            HStack {
+                Text("Scatter\nFile").multilineTextAlignment(.trailing).frame(width: 70, alignment: .trailing)
+                TextField("", text: .constant("\(options.outputName).sct")).textFieldStyle(.roundedBorder).disabled(true)
+                Button("…") {}.disabled(true)
+                Button("Edit…") {}.disabled(true)
+            }
+            HStack(alignment: .top) {
+                Text("Misc\ncontrols").multilineTextAlignment(.trailing).frame(width: 70, alignment: .trailing)
+                TextField("", text: .constant("")).textFieldStyle(.roundedBorder).disabled(true)
+            }
+            controlString("Linker\ncontrol\nstring", "--cpu \(DeviceInfo.forTarget(options).core) *.o\n--strict --scatter \"\(objectsFolder)\\\(options.outputName).sct\"")
         }
     }
+
+    // MARK: Debug / Utilities
 
     private func chooseInitFile() {
         let panel = NSOpenPanel()
@@ -324,30 +524,209 @@ struct OptionsDialog: View {
         }
     }
 
-    private var debugTab: some View {
-        HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack { Image(systemName: "largecircle.fill.circle").foregroundColor(.blue); Text("Use Simulator") }
-                Toggle("Load Application at Startup", isOn: .constant(true)).disabled(true)
-                Toggle("Run to main()", isOn: $options.runToMain)
-                Toggle("Stop on fault (instead of entering the fault handler)", isOn: $options.stopOnFault)
-                Toggle("Periodic Window Update", isOn: $options.periodicUpdate)
-                Text("Initialization File:")
-                HStack {
-                    TextField("", text: Binding(get: { options.debugIniFile ?? "" },
-                                                set: { options.debugIniFile = $0.isEmpty ? nil : $0 }))
-                        .frame(width: 220)
-                    Button("...") { chooseInitFile() }
+    private func radio(_ on: Bool, _ title: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: on ? "largecircle.fill.circle" : "circle").foregroundColor(on ? .blue : .gray)
+            Text(title)
+        }
+    }
+
+    private func restoreSettings(trace: Bool) -> some View {
+        GroupBox("Restore Debug Session Settings") {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                GridRow { Toggle("Breakpoints", isOn: .constant(true)); Toggle("Toolbox", isOn: .constant(true)) }
+                GridRow {
+                    Toggle(trace ? "Watch Windows" : "Watch Windows & Performance Analyzer", isOn: .constant(true))
+                    if trace { Toggle("Tracepoints", isOn: .constant(true)) } else { Text("") }
                 }
-                Text("Debug script run when the session starts (FUNC, SIGNAL, DEFINE BUTTON, commands).")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
+                GridRow { Toggle("Memory Display", isOn: .constant(true)); Toggle("System Viewer", isOn: .constant(true)) }
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                HStack { Image(systemName: "circle").foregroundColor(.gray); Text("Use: ULINK / ST-Link / CMSIS-DAP") }
-                    .foregroundColor(.secondary)
-                Text("Hardware debugging (OpenOCD / pyOCD) is planned.").foregroundColor(.secondary)
+            .disabled(true)
+            .padding(2)
+        }
+    }
+
+    private var debugTab: some View {
+        let device = DeviceInfo.forTarget(options)
+        let lpc = device.name.uppercased().hasPrefix("LPC17")
+        return VStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                // Simulator (the only debugger in ARM Sim).
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        radio(true, "Use Simulator")
+                        Spacer()
+                        Button("Settings") {}.disabled(true)
+                    }
+                    Toggle("Limit Speed to Real-Time", isOn: .constant(false)).disabled(true)
+                    Divider()
+                    HStack {
+                        Toggle("Load Application at Startup", isOn: .constant(true)).disabled(true)
+                        Spacer()
+                        Toggle("Run to main()", isOn: $options.runToMain)
+                    }
+                    Text("Initialization File:")
+                    HStack(spacing: 4) {
+                        TextField("", text: Binding(get: { options.debugIniFile ?? "" },
+                                                    set: { options.debugIniFile = $0.isEmpty ? nil : $0 }))
+                            .textFieldStyle(.roundedBorder)
+                        Button("…") { chooseInitFile() }
+                        Button("Edit…") {
+                            if let file = options.debugIniFile, let dir = workspace.projectDirectory {
+                                workspace.openDocument(file.hasPrefix("/") ? URL(fileURLWithPath: file) : dir.appendingPathComponent(file))
+                            }
+                        }
+                        .disabled(options.debugIniFile == nil)
+                    }
+                    restoreSettings(trace: false)
+                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+                        GridRow { Text("CPU DLL:"); Text("Parameter:") }
+                        GridRow {
+                            TextField("", text: .constant("SARMCM3.DLL")).frame(width: 100).disabled(true)
+                            TextField("", text: .constant("-MPU")).disabled(true)
+                        }
+                        GridRow { Text("Dialog DLL:"); Text("Parameter:") }
+                        GridRow {
+                            TextField("", text: .constant(lpc ? "DARMP1.DLL" : "DCM.DLL")).frame(width: 100).disabled(true)
+                            TextField("", text: .constant(lpc ? "-p\(device.name) -dLandTiger" : "-p\(device.name)")).disabled(true)
+                        }
+                    }
+                    Toggle("Warn if outdated Executable is loaded", isOn: .constant(true)).disabled(true)
+                    // ARM Sim options (no µVision equivalent on this tab).
+                    HStack(spacing: 14) {
+                        Toggle("Stop on fault", isOn: $options.stopOnFault)
+                        Toggle("Periodic Window Update", isOn: $options.periodicUpdate)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                Divider()
+                // Hardware debugger: not available.
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        radio(false, "Use:")
+                        Picker("", selection: .constant(0)) { Text("ULINK2/ME Cortex Debugger").tag(0) }.labelsHidden()
+                        Button("Settings") {}
+                    }
+                    Spacer().frame(height: 20)
+                    Divider()
+                    HStack {
+                        Toggle("Load Application at Startup", isOn: .constant(true))
+                        Spacer()
+                        Toggle("Run to main()", isOn: .constant(true))
+                    }
+                    Text("Initialization File:")
+                    HStack(spacing: 4) {
+                        TextField("", text: .constant("")).textFieldStyle(.roundedBorder)
+                        Button("…") {}
+                        Button("Edit…") {}
+                    }
+                    restoreSettings(trace: true)
+                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+                        GridRow { Text("Driver DLL:"); Text("Parameter:") }
+                        GridRow {
+                            TextField("", text: .constant("SARMCM3.DLL")).frame(width: 100)
+                            TextField("", text: .constant("-MPU"))
+                        }
+                        GridRow { Text("Dialog DLL:"); Text("Parameter:") }
+                        GridRow {
+                            TextField("", text: .constant("TARMP1.DLL")).frame(width: 100)
+                            TextField("", text: .constant("-p\(device.name)"))
+                        }
+                    }
+                    Toggle("Warn if outdated Executable is loaded", isOn: .constant(true))
+                }
+                .disabled(true)
+                .frame(maxWidth: .infinity)
             }
+            Button("Manage Component Viewer Description Files …") {}.disabled(true)
+        }
+    }
+
+    private var utilitiesTab: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            GroupBox("Configure Flash Menu Command") {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        radio(true, "Use Target Driver for Flash Programming")
+                        Spacer()
+                        Toggle("Use Debug Driver", isOn: .constant(true))
+                    }
+                    HStack {
+                        Text("--- Use Debug Driver ---").padding(.leading, 40)
+                        Spacer()
+                        Button("Settings") {}
+                        Toggle("Update Target before Debugging", isOn: .constant(true))
+                    }
+                    HStack { Text("Init File:"); TextField("", text: .constant("")); Button("…") {}; Button("Edit…") {} }
+                    radio(false, "Use External Tool for Flash Programming")
+                    HStack { Text("Command:"); TextField("", text: .constant("")) }
+                    HStack { Text("Arguments:"); TextField("", text: .constant("")) }
+                    Toggle("Run Independent", isOn: .constant(false)).padding(.leading, 70)
+                }
+                .padding(4)
+            }
+            GroupBox("Configure Image File Processing (FCARM):") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow { Text("Output File:"); Text("Add Output File  to Group:") }
+                    GridRow {
+                        TextField("", text: .constant(""))
+                        Picker("", selection: .constant(0)) { Text(workspace.project?.groups.first?.name ?? "").tag(0) }.labelsHidden()
+                    }
+                    GridRow {
+                        HStack { Text("Image Files Root Folder:"); TextField("", text: .constant("")) }
+                        Toggle("Generate Listing", isOn: .constant(false))
+                    }
+                }
+                .padding(4)
+            }
+        }
+        .disabled(true)
+    }
+
+    private var deviceTab: some View {
+        let device = DeviceInfo.forTarget(options)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("", selection: .constant(0)) { Text(options.packID == nil ? "Built-in Devices" : "Software Packs").tag(0) }
+                        .labelsHidden().frame(width: 290).disabled(true)
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
+                        GridRow { Text("Vendor:"); Text(device.vendor) }
+                        GridRow { Text("Device:"); Text(device.name) }
+                        GridRow { Text("Toolset:"); Text("ARM") }
+                    }
+                }
+                Spacer()
+                GroupBox("Software Pack") {
+                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                        GridRow { Text("Pack:"); TextField("", text: .constant(options.packID ?? "")).frame(width: 250).disabled(true) }
+                        GridRow {
+                            Text("URL:")
+                            Link("https://www.keil.arm.com/packs/", destination: URL(string: "https://www.keil.arm.com/packs/")!)
+                        }
+                    }
+                    .padding(2)
+                }
+            }
+            HStack {
+                Button("Select Device…") { showDevices = true }
+                Spacer()
+            }
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(device.name).bold()
+                    Text("Core: \(device.core)")
+                    Text(String(format: "IROM: 0x%08X, %d KB", device.romBase, device.romSize / 1024))
+                    Text(String(format: "IRAM: 0x%08X, %d KB", device.ramBase, device.ramSize / 1024))
+                }
+                .frame(width: 290, alignment: .topLeading)
+                ScrollView {
+                    Text(device.summary).frame(maxWidth: .infinity, alignment: .topLeading).padding(4)
+                }
+                .background(Color.white)
+                .border(UVColors.border, width: 0.5)
+            }
+            .frame(maxHeight: .infinity)
         }
     }
 }

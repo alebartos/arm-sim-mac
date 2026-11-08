@@ -290,6 +290,14 @@ final class Workspace: ObservableObject {
         set(".//Cads/VariousControls/Define", project.options.defines)
         set(".//Aads/VariousControls/Define", project.options.asmDefines ?? "")
         set(".//Cads/VariousControls/IncludePath", project.options.includePaths.replacingOccurrences(of: "/", with: "\\"))
+        // Arm Compiler 6 list indices, as read in loadUVTarget (0 = <default>).
+        let languages = ["", "c90", "gnu90", "c99", "gnu99", "c11", "gnu11"]
+        if let standard = project.options.cStandard, let index = languages.firstIndex(of: standard) { set(".//Cads/v6Lang", "\(index)") }
+        let levels = ["", "-O0", "-O1", "-O2", "-O3", "-Ofast", "-Os", "-Oz"]
+        if let index = levels.firstIndex(of: project.options.optimization), index > 0,
+           Int(element(".//Cads/Optim")?.stringValue ?? "") != index, !(index == 7 && element(".//Cads/Optim")?.stringValue == "8") {
+            set(".//Cads/Optim", "\(index)")
+        }
 
         // Groups: reuse existing nodes (keeps per-group/per-file options), create missing ones.
         let groupsNode = element("Groups") ?? {

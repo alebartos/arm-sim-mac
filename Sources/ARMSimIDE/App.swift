@@ -369,8 +369,7 @@ extension SmokeTest {
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: output)
                 FileHandle.standardError.write(Data("[shot] \(output.path)\n".utf8))
-                NSApp.terminate(nil)
-                return
+                exit(0)   // NSApp.terminate is refused while a sheet is open
             }
             if ProcessInfo.processInfo.environment["ARMSIM_SHOT_MENUS"] != nil, let menu = NSApp.mainMenu {
                 func dump(_ menu: NSMenu, _ depth: Int) {
