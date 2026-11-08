@@ -12,11 +12,20 @@ final class WindowLayout: ObservableObject {
     @Published var showBuildOutput = true
     @Published var showCommand = true
     @Published var showDisassembly = true
+    /// Logic Analyzer, a tab next to Disassembly as in µVision; `topTab` 0 = Disassembly, 1 = Logic Analyzer.
+    @Published var showLogicAnalyzer = false
+    @Published var topTab = 0
     @Published var showRegisters = true
     @Published var showBottomRight = true
     @Published var bottomRightTab = 0
     /// Edit mode: 0 Project, 1 Books, 2 Functions, 3 Templates. Debug mode: 0 Project, 1 Registers, 2 Symbols.
     @Published var leftTab = 0
+
+    /// View ▸ Analysis Windows ▸ Logic Analyzer.
+    func openLogicAnalyzer() {
+        showLogicAnalyzer = true
+        topTab = 1
+    }
 
     /// Window Layout ▸ Reset View to Defaults.
     func reset() {
@@ -27,6 +36,8 @@ final class WindowLayout: ObservableObject {
         showRegisters = true
         showBottomRight = true
         bottomRightTab = 0
+        showLogicAnalyzer = false
+        topTab = 0
         leftTab = Workspace.shared.mode == .debug ? 1 : 0
     }
 }
@@ -231,7 +242,7 @@ struct DebugToolbar: View {
                 Button("Debug (printf) Viewer") { layout.showBottomRight = true; layout.bottomRightTab = 3 }
             }
             ToolMenuButton(icon: "waveform.path.ecg", help: "Analysis Windows") {
-                Button("Logic Analyzer") { openWindow(id: "logic") }
+                Button("Logic Analyzer") { WindowLayout.shared.openLogicAnalyzer() }
                 Button("Code Coverage") { openWindow(id: "coverage") }
             }
             ToolMenuButton(icon: "point.3.connected.trianglepath.dotted", help: "Trace Windows", enabled: false) {}

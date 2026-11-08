@@ -118,17 +118,31 @@ struct MainWindow: View {
 
     @ViewBuilder
     private var centerPane: some View {
-        if workspace.mode == .debug && layout.showDisassembly {
+        if workspace.mode == .debug && (layout.showDisassembly || layout.showLogicAnalyzer) {
+            let analyzer = layout.showLogicAnalyzer && (layout.topTab == 1 || !layout.showDisassembly)
             VSplitView {
                 VStack(spacing: 0) {
-                    PaneHeader(title: "Disassembly") { layout.showDisassembly = false }
-                    DisassemblyPanel(workspace: workspace, debugger: workspace.debugger)
+                    PaneHeader(title: analyzer ? "Logic Analyzer" : "Disassembly") {
+                        if analyzer { layout.showLogicAnalyzer = false; layout.topTab = 0 } else { layout.showDisassembly = false }
+                    }
+                    if analyzer {
+                        LogicAnalyzerView()
+                    } else {
+                        DisassemblyPanel(workspace: workspace, debugger: workspace.debugger)
+                    }
+                    if layout.showLogicAnalyzer && layout.showDisassembly {
+                        BottomTabBar(tabs: [("list.bullet.rectangle", "Disassembly"), ("waveform.path", "Logic Analyzer")],
+                                     selection: $layout.topTab)
+                    }
                 }
-                .frame(minHeight: 80, idealHeight: 120)
+                .frame(minHeight: layout.showLogicAnalyzer ? 220 : 80, idealHeight: layout.showLogicAnalyzer ? 420 : 120)
+                .layoutPriority(layout.showLogicAnalyzer ? 1 : 0)
                 EditorArea(workspace: workspace)
-                    .frame(minHeight: 120, maxHeight: .infinity)
-                    .layoutPriority(1)
+                    .frame(minHeight: 120, idealHeight: layout.showLogicAnalyzer ? 120 : 600, maxHeight: .infinity)
+                    .layoutPriority(layout.showLogicAnalyzer ? 0 : 1)
             }
+            // Re-split when the Logic Analyzer opens or closes (µVision gives it most of the height).
+            .id(layout.showLogicAnalyzer)
         } else {
             EditorArea(workspace: workspace)
         }

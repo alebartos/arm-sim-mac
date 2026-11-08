@@ -29,6 +29,8 @@ struct LASignalConfig: Identifiable, Equatable {
     var minimum: Double?
     var maximum: Double?
     var colorIndex: Int
+    /// Setup ▸ Hexadecimal Display: values shown in hex.
+    var hexDisplay = false
 
     func value(of raw: UInt32) -> UInt32 { (raw & mask) >> shift }
 }
@@ -100,11 +102,15 @@ final class LogicAnalyzer: ObservableObject {
     /// Parse and add a signal. Returns an error text when the expression cannot be resolved.
     @discardableResult
     func addSignal(_ expression: String, display: LADisplay? = nil) -> String? {
-        let text = expression.trimmingCharacters(in: .whitespaces)
+        // "LA `PORT2": µVision marks VTREGs with a back quote.
+        let text = expression.trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: "`")))
         guard !text.isEmpty else { return "empty expression" }
         guard let parsed = parse(text) else { return "cannot resolve '\(text)'" }
+        // µVision's default display range: 0 to the largest value of the signal (its size, mask and shift).
+        var full = parsed.mask >> parsed.shift
+        if case .memory(_, let size) = parsed.source, size < 4 { full = min(full, UInt32((1 << (size * 8)) - 1)) }
         let config = LASignalConfig(expression: text, source: parsed.source, display: display ?? parsed.display,
-                                    mask: parsed.mask, shift: parsed.shift, minimum: nil, maximum: nil,
+                                    mask: parsed.mask, shift: parsed.shift, minimum: 0, maximum: Double(full),
                                     colorIndex: signals.count)
         signals.append(config)
         lock.lock()
@@ -128,6 +134,10 @@ final class LogicAnalyzer: ObservableObject {
         dirty = true
         lock.unlock()
         publish()
+    }
+
+    func removeAllSignals() {
+        for id in signals.map(\.id) { removeSignal(id) }
     }
 
     func removeSignal(_ id: UUID) {
@@ -168,7 +178,7 @@ final class LogicAnalyzer: ObservableObject {
                 return (.memory(address: 0x2009_C014 + port * 0x20, size: 4), .bit, 1 << bit, bit)
             }
             if parts.count == 1, let port = UInt32(parts[0]), port < 5 {
-                return (.memory(address: 0x2009_C014 + port * 0x20, size: 4), .hex, 0xFFFF_FFFF, 0)
+                return (.memory(address: 0x2009_C014 + port * 0x20, size: 4), .analog, 0xFFFF_FFFF, 0)
             }
         }
         // Optional trailing ".bit"

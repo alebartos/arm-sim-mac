@@ -34,7 +34,6 @@ struct ARMSimApp: App {
         Window("Code Coverage", id: "coverage") { CodeCoverageWindow() }
         Window("System Viewer", id: "systemviewer") { SystemViewerView() }
         Window("Pack Installer", id: "packs") { PackInstallerView() }
-        Window("Logic Analyzer", id: "logic") { LogicAnalyzerView() }
         Window("Toolbox", id: "toolbox") { ToolboxWindow() }
             .windowResizability(.contentSize)
     }
@@ -378,6 +377,13 @@ extension SmokeTest {
                 ws.showBreakpoints = true
             }
         }
+        // ARMSIM_SHOT_LA=<signal>: open the Logic Analyzer tab with that signal (with --debug).
+        if let signal = ProcessInfo.processInfo.environment["ARMSIM_SHOT_LA"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
+                LogicAnalyzer.shared.addSignal(signal)
+                WindowLayout.shared.openLogicAnalyzer()
+            }
+        }
         // ARMSIM_SHOT_TABS=<left>,<bottom right>: select those dock tabs (e.g. 2,1 = Symbols + Watch 1).
         if let tabs = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TABS"]?.split(separator: ",").compactMap({ Int($0) }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 5.5 : 2)) {
@@ -396,6 +402,7 @@ extension SmokeTest {
                 case "faults": view = AnyView(FaultReportsWindow())
                 case "pinconnect": view = AnyView(PinConnectWindow())
                 case "toolbox": view = AnyView(ToolboxWindow())
+                case "lasetup": view = AnyView(LogicAnalyzerSetup(analyzer: LogicAnalyzer.shared))
                 default: view = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
                 }
                 let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))

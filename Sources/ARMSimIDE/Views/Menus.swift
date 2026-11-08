@@ -353,7 +353,7 @@ struct ViewMenuItems: View {
                 Button("Debug (printf) Viewer") { layout.showBottomRight = true; layout.bottomRightTab = 3 }
             }
             Menu("Analysis Windows") {
-                Button("Logic Analyzer") { openWindow(id: "logic") }
+                Button("Logic Analyzer") { WindowLayout.shared.openLogicAnalyzer() }
                 Button("Code Coverage") { openWindow(id: "coverage") }
             }
             Menu("Trace") {
