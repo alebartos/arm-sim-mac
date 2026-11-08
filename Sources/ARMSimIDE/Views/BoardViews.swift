@@ -93,12 +93,13 @@ struct GPIOWindow: View {
 /// Hex value box of µVision's peripheral dialogs: shows 0x%08X, Return writes the new value.
 struct HexField: View {
     let value: UInt32
+    var digits = 8
     let onCommit: (UInt32) -> Void
     @LocalState private var text = ""
     @LocalState private var editing = false
 
     var body: some View {
-        TextField("", text: Binding(get: { editing ? text : String(format: "0x%08X", value) },
+        TextField("", text: Binding(get: { editing ? text : String(format: "0x%0\(digits)X", value) },
                                     set: { text = $0; editing = true }))
             .font(.system(size: 11))
             .textFieldStyle(.squareBorder)
@@ -303,10 +304,7 @@ struct TimerWindow: View {
 
     private var base: UInt32 { [0x4000_4000, 0x4000_8000, 0x4009_0000, 0x4009_4000][min(index, 3)] }
 
-    private func reg(_ offset: UInt32) -> UInt32 {
-        let bytes = debugger.readMemory(base + offset, count: 4)
-        return bytes.enumerated().reduce(0) { $0 | (UInt32($1.element ?? 0) << UInt32(8 * $1.offset)) }
-    }
+    private func reg(_ offset: UInt32) -> UInt32 { debugger.readRegister(base + offset) }
 
     private func write(_ offset: UInt32, _ value: UInt32) { debugger.writeMemory(base + offset, size: 4, value: value) }
 

@@ -581,6 +581,13 @@ final class DebugController: ObservableObject {
 
     // MARK: Memory and expressions (only while stopped)
 
+    /// Peripheral / core register read for the peripheral dialogs: goes through the device's `peek`
+    /// (no read side effects), unlike `readMemory`, which shows MMIO as unreadable. 0 while running.
+    func readRegister(_ address: UInt32, size: Int = 4) -> UInt32 {
+        guard let sim = simulator, !isRunning else { return 0 }
+        return queue.sync { sim.memory.peekRegister(address, size: size) ?? 0 }
+    }
+
     func readMemory(_ address: UInt32, count: Int) -> [UInt8?] {
         // While running the simulation queue is busy: never block the UI on it.
         guard let sim = simulator, !isRunning else { return [UInt8?](repeating: nil, count: count) }

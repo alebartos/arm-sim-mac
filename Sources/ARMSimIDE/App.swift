@@ -378,7 +378,13 @@ extension SmokeTest {
             // ARMSIM_SHOT_VIEW=gpio<n>|timer<n>: render that peripheral window instead of the main window.
             if let name = ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] {
                 let index = Int(name.filter(\.isNumber)) ?? 0
-                let view: AnyView = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
+                let view: AnyView
+                switch name {
+                case "nvic": view = AnyView(NVICWindow())
+                case "systick": view = AnyView(SysTickWindow())
+                case "faults": view = AnyView(FaultReportsWindow())
+                default: view = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
+                }
                 let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
                 host.frame = NSRect(origin: .zero, size: host.fittingSize)
                 let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)

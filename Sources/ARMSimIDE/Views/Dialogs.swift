@@ -856,64 +856,6 @@ struct DeviceSelectionDialog: View {
 
 // MARK: - Peripherals > Core Peripherals
 
-struct NVICWindow: View {
-    @ObservedObject var debugger = Workspace.shared.debugger
-    @LocalState private var showAll = false
-
-    var body: some View {
-        let entries = debugger.snapshot.nvic.filter { showAll || $0.number < 16 || $0.enabled || $0.pending || $0.active }
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(["Idx", "Source", "Name", "E", "P", "A", "Priority"], id: \.self) { title in
-                    Text(title).frame(width: title.count <= 1 ? 26 : title == "Source" ? 120 : 70, alignment: .leading)
-                }
-            }
-            .font(.system(size: 11, weight: .semibold)).padding(4).background(UVColors.chrome)
-            List(entries) { e in
-                HStack(spacing: 0) {
-                    Text("\(e.number)").frame(width: 70, alignment: .leading)
-                    Text(ExceptionNumber.name(e.number)).frame(width: 120, alignment: .leading)
-                    Text(e.number >= 16 ? "IRQ\(e.number - 16)" : "").frame(width: 70, alignment: .leading)
-                    Text(e.enabled ? "1" : "0").frame(width: 26, alignment: .leading)
-                    Text(e.pending ? "1" : "0").frame(width: 26, alignment: .leading)
-                    Text(e.active ? "1" : "0").frame(width: 26, alignment: .leading)
-                    Text(e.number <= 3 ? "\(e.number == 1 ? -3 : e.number == 2 ? -2 : -1)" : "\(e.priority)")
-                        .frame(width: 70, alignment: .leading)
-                }
-                .font(UVColors.mono)
-            }
-            .listStyle(.plain)
-            Toggle("Show all interrupts", isOn: $showAll).padding(6).font(UVColors.small)
-        }
-        .frame(minWidth: 460, minHeight: 300)
-    }
-}
-
-struct SysTickWindow: View {
-    @ObservedObject var debugger = Workspace.shared.debugger
-
-    var body: some View {
-        let s = debugger.snapshot
-        Form {
-            Section("Control and Status") {
-                LabeledContent("CTRL", value: hex(s.sysTickCSR))
-                Toggle("ENABLE", isOn: .constant(s.sysTickCSR & 1 != 0)).disabled(true)
-                Toggle("TICKINT", isOn: .constant(s.sysTickCSR & 2 != 0)).disabled(true)
-                Toggle("CLKSOURCE", isOn: .constant(s.sysTickCSR & 4 != 0)).disabled(true)
-                Toggle("COUNTFLAG", isOn: .constant(s.sysTickCSR & 0x10000 != 0)).disabled(true)
-            }
-            Section("Reload and Current Value") {
-                LabeledContent("LOAD (RELOAD)", value: String(format: "0x%06X", s.sysTickReload))
-                LabeledContent("VAL (CURRENT)", value: String(format: "0x%06X", s.sysTickCurrent))
-                LabeledContent("CALIB", value: "0xC0000000")
-            }
-        }
-        .font(UVColors.mono)
-        .padding()
-        .frame(minWidth: 320, minHeight: 330)
-    }
-}
-
 struct FaultReportsWindow: View {
     @ObservedObject var debugger = Workspace.shared.debugger
 
