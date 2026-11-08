@@ -25,10 +25,12 @@ struct EditorConfig: Codable, Equatable {
     var viewWhiteSpace = false
     var viewEndOfLine = false
     var highlightCurrentLine = true
+    var highlightBraces = true
     /// 0 = None, 1 = Line at `rightMarginColumn`.
     var rightMargin = 0
     var rightMarginColumn = 80
     var createBackup = false
+    var autoReload = false
     var saveProjectBeforeDebug = false
     var saveFilesBeforeDebug = true
     var c = FileType(syntaxColoring: true, insertSpaces: false, tabSize: 2, lineNumbers: true, monospaced: true)
@@ -100,11 +102,29 @@ final class EditorSettings: ObservableObject {
     }
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key), let saved = try? JSONDecoder().decode(EditorConfig.self, from: data) {
-            config = saved
-        } else {
-            config = EditorConfig()
+        config = Self.load(UserDefaults.standard.data(forKey: Self.key))
+    }
+
+    /// Saved settings over the defaults, so settings added in a later version keep their default value.
+    static func load(_ data: Data?) -> EditorConfig {
+        guard let data, let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(EditorConfig())) as? [String: Any] else {
+            return EditorConfig()
         }
+        func merge(_ base: [String: Any], _ over: [String: Any]) -> [String: Any] {
+            var result = base
+            for (k, v) in over {
+                if let b = base[k] as? [String: Any], let o = v as? [String: Any], k != "colors", k != "userKeywords", k != "templates" {
+                    result[k] = merge(b, o)
+                } else {
+                    result[k] = v
+                }
+            }
+            return result
+        }
+        guard let merged = try? JSONSerialization.data(withJSONObject: merge(defaults, saved)),
+              let config = try? JSONDecoder().decode(EditorConfig.self, from: merged) else { return EditorConfig() }
+        return config
     }
 
     private func save() {
@@ -119,6 +139,8 @@ final class EditorSettings: ObservableObject {
             ColorElement(key: "caretLine", name: "Caret Line", foreground: nil, background: NSColor(calibratedRed: 0.88, green: 1, blue: 0.9, alpha: 1)),
             ColorElement(key: "selection", name: "Text Selection", foreground: .white, background: NSColor(calibratedRed: 0.2, green: 0.45, blue: 0.85, alpha: 1)),
             ColorElement(key: "rightMargin", name: "Right Margin", foreground: NSColor(calibratedWhite: 0.75, alpha: 1), background: nil),
+            ColorElement(key: "braceMatch", name: "Matching Braces", foreground: nil, background: NSColor(calibratedRed: 0.78, green: 0.85, blue: 1, alpha: 1)),
+            ColorElement(key: "braceMismatch", name: "Mismatched Braces", foreground: nil, background: NSColor(calibratedRed: 1, green: 0.6, blue: 0.6, alpha: 1)),
         ]),
         ("Asm Editor files", "asm", [
             ColorElement(key: "text", name: "Text", foreground: .black, background: .white),

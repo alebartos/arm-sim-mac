@@ -382,6 +382,17 @@ extension SmokeTest {
             if let dir = ws.projectDirectory { ws.openDocument(dir.appendingPathComponent(String(file))) }
         }
         if debug { ws.toggleDebugSession() }
+        // ARMSIM_SHOT_CARET=<line>:<column>: put the caret there in the active editor.
+        if let caret = ProcessInfo.processInfo.environment["ARMSIM_SHOT_CARET"]?.split(separator: ":").compactMap({ Int($0) }), caret.count == 2 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                guard let view = EditorCommands.textView else { return }
+                let text = view.string as NSString
+                var start = 0
+                for _ in 1..<max(caret[0], 1) { start = NSMaxRange(text.lineRange(for: NSRange(location: start, length: 0))) }
+                view.setSelectedRange(NSRange(location: min(start + caret[1] - 1, text.length), length: 0))
+                view.scrollRangeToVisible(view.selectedRange())
+            }
+        }
         // ARMSIM_SHOT_OPTIONS=<tab>: capture the Options for Target dialog on that tab instead.
         let optionsTab = ProcessInfo.processInfo.environment["ARMSIM_SHOT_OPTIONS"].flatMap(Int.init)
         if let optionsTab {

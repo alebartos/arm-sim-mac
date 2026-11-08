@@ -135,7 +135,7 @@ struct ConfigurationDialog: View {
                 section("Look & Feel:") {
                     Toggle("Show Message Dialog during Find", isOn: .constant(false)).disabled(true)
                     Toggle("Highlight Current Line", isOn: $config.highlightCurrentLine)
-                    Toggle("Highlight matching and mismatched braces", isOn: .constant(false)).disabled(true)
+                    Toggle("Highlight matching and mismatched braces", isOn: $config.highlightBraces)
                     Toggle("Print with syntax coloring", isOn: .constant(false)).disabled(true)
                     Toggle("Colored Editor Tabs", isOn: .constant(false)).disabled(true)
                     HStack(spacing: 4) {
@@ -150,7 +150,7 @@ struct ConfigurationDialog: View {
                 Divider()
                 section("File & Project Handling:") {
                     Toggle("Create Backup files (*.BAK)", isOn: $config.createBackup)
-                    Toggle("Automatic reload of externally modified files", isOn: .constant(false)).disabled(true)
+                    Toggle("Automatic reload of externally modified files", isOn: $config.autoReload)
                     Toggle("Save Project before entering Debug", isOn: $config.saveProjectBeforeDebug)
                     Toggle("Save Files before entering Debug", isOn: $config.saveFilesBeforeDebug)
                     HStack(spacing: 4) {

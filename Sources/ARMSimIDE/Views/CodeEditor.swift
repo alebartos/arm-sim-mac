@@ -146,7 +146,8 @@ struct CodeEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView, let gutter else { return }
-            if EditorSettings.shared.config.highlightCurrentLine { textView.needsDisplay = true }
+            let config = EditorSettings.shared.config
+            if config.highlightCurrentLine || config.highlightBraces { textView.needsDisplay = true }
             EditorCommands.lastEditor = textView
             let location = textView.selectedRange().location
             let line = gutter.lineNumber(forCharacterIndex: location)
@@ -208,6 +209,39 @@ final class EditorTextView: NSTextView {
         if !indent.isEmpty { insertText(indent, replacementRange: selectedRange()) }
     }
 
+    /// The brace next to the caret (before it first) and its partner; partner nil = mismatched.
+    private func bracePair() -> (Int, Int?)? {
+        let text = string as NSString
+        let caret = selectedRange().location
+        let pairs: [unichar: (unichar, Bool)] = [40: (41, true), 91: (93, true), 123: (125, true),
+                                                41: (40, false), 93: (91, false), 125: (123, false)]
+        for at in [caret - 1, caret] where at >= 0 && at < text.length {
+            let c = text.character(at: at)
+            guard let (partner, forward) = pairs[c] else { continue }
+            var depth = 0
+            var i = at
+            var steps = 0
+            while steps < 200_000 {
+                i += forward ? 1 : -1
+                steps += 1
+                guard i >= 0 && i < text.length else { return (at, nil) }
+                let d = text.character(at: i)
+                if d == c { depth += 1 } else if d == partner { if depth == 0 { return (at, i) }; depth -= 1 }
+            }
+            return (at, nil)
+        }
+        return nil
+    }
+
+    private func characterRect(_ location: Int) -> NSRect? {
+        guard let layout = layoutManager, let container = textContainer else { return nil }
+        let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: location, length: 1), actualCharacterRange: nil)
+        var rect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+        rect.origin.x += textContainerOrigin.x
+        rect.origin.y += textContainerOrigin.y
+        return rect
+    }
+
     /// Caret line highlight and right margin (Edit ▸ Configuration).
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -229,6 +263,13 @@ final class EditorTextView: NSTextView {
                 lineRect.origin.y += textContainerInset.height
                 settings.color("all", "caretLine", background: true).setFill()
                 lineRect.fill()
+            }
+        }
+        if settings.config.highlightBraces, selectedRange().length == 0, let pair = bracePair() {
+            for location in [pair.0, pair.1].compactMap({ $0 }) {
+                guard let rect = characterRect(location) else { continue }
+                settings.color("all", pair.1 == nil ? "braceMismatch" : "braceMatch", background: true).setFill()
+                rect.fill()
             }
         }
         if settings.config.rightMargin == 1 {

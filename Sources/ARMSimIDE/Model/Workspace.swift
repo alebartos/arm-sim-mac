@@ -13,10 +13,36 @@ final class SourceDocument: ObservableObject, Identifiable {
     var path: String { canonicalPath(url.path) }
     var kind: SourceKind { SourceKind(url: url) }
 
+    /// Modification date of the file when it was last read or written.
+    private(set) var diskDate: Date?
+
     init(url: URL) {
         self.url = url
         text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        diskDate = Self.modificationDate(url)
     }
+
+    static func modificationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// The file changed on disk since it was read or saved here.
+    var changedOnDisk: Bool {
+        guard let now = Self.modificationDate(url), let diskDate else { return false }
+        return now > diskDate
+    }
+
+    /// Replace the text with the file on disk.
+    func reload() {
+        guard let disk = try? String(contentsOf: url, encoding: .utf8) else { return }
+        text = disk
+        isDirty = false
+        diskDate = Self.modificationDate(url)
+        externalRevision += 1
+    }
+
+    /// Keep the current text but stop reporting the change on disk.
+    func acknowledgeDiskChange() { diskDate = Self.modificationDate(url) }
 
     func save() {
         guard isDirty else { return }
@@ -29,6 +55,7 @@ final class SourceDocument: ObservableObject, Identifiable {
             }
             try text.write(to: url, atomically: true, encoding: .utf8)
             isDirty = false
+            diskDate = Self.modificationDate(url)
         } catch {
             NSSound.beep()
         }
@@ -83,6 +110,9 @@ final class Workspace: ObservableObject {
     var activeDocument: SourceDocument? { documents.first { $0.id == activeDocumentID } }
 
     init() {
+        // Edit ▸ Configuration ▸ Automatic reload of externally modified files: checked when the app comes back.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.reloadExternallyModified() }.store(in: &cancellables)
         debugger.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         debugger.$currentLocation.receive(on: DispatchQueue.main).sink { [weak self] location in
             guard let self, let location else { return }
@@ -494,6 +524,23 @@ final class Workspace: ObservableObject {
         }
         activeDocumentID = path
         if let line { revealRequest = SourceLocation(path: path, line: line) }
+    }
+
+    /// Reload unmodified documents changed by another program; ask before discarding edits.
+    func reloadExternallyModified() {
+        guard EditorSettings.shared.config.autoReload else { return }
+        for document in documents where document.changedOnDisk {
+            if !document.isDirty {
+                document.reload()
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "\(document.url.lastPathComponent) has been modified outside of the editor."
+                alert.informativeText = "Reload it and lose your changes?"
+                alert.addButton(withTitle: "Reload")
+                alert.addButton(withTitle: "Keep")
+                if alert.runModal() == .alertFirstButtonReturn { document.reload() } else { document.acknowledgeDiskChange() }
+            }
+        }
     }
 
     func closeDocument(_ id: String) {
