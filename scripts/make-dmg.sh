@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Builds "ARM Sim.app" and packs it into build/ARM-Sim-<version>-macOS.dmg
-# (drag-to-Applications layout). Usage: scripts/make-dmg.sh <version>, e.g. v0.1.1
+# (drag-to-Applications layout). Usage: scripts/make-dmg.sh <version>, e.g. v0.2.0
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=${1:?usage: make-dmg.sh <version>}

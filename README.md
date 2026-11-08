@@ -51,7 +51,7 @@ The release build is for Apple silicon (arm64). On an Intel Mac, build the app f
 
 ```sh
 ./scripts/make-app.sh          # creates build/ARM Sim.app
-./scripts/make-dmg.sh v0.1.1   # also packs it into build/ARM-Sim-v0.1.1-macOS.dmg
+./scripts/make-dmg.sh v0.2.0   # also packs it into build/ARM-Sim-v0.2.0-macOS.dmg
 open "build/ARM Sim.app"
 ```
 
