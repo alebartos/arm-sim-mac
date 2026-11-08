@@ -7,7 +7,8 @@ enum UVColors {
                                           startPoint: .top, endPoint: .bottom)
     static let border = Color(nsColor: NSColor(calibratedWhite: 0.72, alpha: 1))
     static let changed = Color(red: 0.2, green: 0.45, blue: 0.85)
-    static let mono = Font.system(size: 11, design: .monospaced)
+    /// µVision uses Courier New in the Disassembly, Command and Build Output windows.
+    static let mono = NSFont(name: "Courier New", size: 13) != nil ? Font.custom("Courier New", size: 13) : Font.system(size: 11, design: .monospaced)
     static let small = Font.system(size: 11)
 }
 

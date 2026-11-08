@@ -55,7 +55,8 @@ struct DisassemblyPanel: View {
         case .label(let name):
             Text("\(name):").font(UVColors.mono.weight(.semibold)).foregroundColor(.black).padding(.leading, 30).frame(height: 15)
         case .source(let text):
-            Text(text).font(UVColors.mono).foregroundColor(Color(white: 0.35)).padding(.leading, 30).frame(height: 15)
+            // µVision: source lines in dark red, instructions in black.
+            Text(text).font(UVColors.mono).foregroundColor(Color(red: 0.65, green: 0.15, blue: 0.1)).padding(.leading, 26).frame(height: 15)
                 .fixedSize()
         case .instruction(let line):
             HStack(spacing: 0) {
@@ -80,12 +81,12 @@ struct DisassemblyPanel: View {
                 Text(String(format: "0x%08X ", line.address) + line.bytes.padding(toLength: 10, withPad: " ", startingAt: 0)
                      + line.mnemonic.padding(toLength: 9, withPad: " ", startingAt: 0) + line.operands)
                     .font(UVColors.mono)
-                    .foregroundColor(line.address == pc ? .black : Color(red: 0, green: 0, blue: 0.55))
+                    .foregroundColor(.black)
                     .fixedSize()
                 Spacer(minLength: 0)
             }
             .frame(height: 15)
-            .background(line.address == pc && debugger.isActive ? Color(red: 1, green: 1, blue: 0.75) : .clear)
+            .background(line.address == pc && debugger.isActive ? Color(red: 1, green: 1, blue: 0) : .clear)
             .onTapGesture(count: 2) { workspace.toggleAddressBreakpoint(line.address) }
         }
     }
@@ -95,13 +96,10 @@ struct DisassemblyPanel: View {
         var rows: [Row] = []
         var lastLocation: SourceLocation?
         for line in info.instructions {
-            if let label = info.labels[line.address] {
-                rows.append(Row(id: -(rows.count + 1), kind: .label(label), address: nil))
-            }
             if let location = info.lineByAddress[line.address], location != lastLocation {
                 lastLocation = location
                 let text = sourceLine(location)
-                rows.append(Row(id: -(rows.count + 1), kind: .source(String(format: "%5d: %@", location.line, text)), address: nil))
+                rows.append(Row(id: -(rows.count + 1), kind: .source(String(format: "%6d: %@", location.line, text)), address: nil))
             }
             rows.append(Row(id: Int(line.address) * 4 + 3, kind: .instruction(line), address: line.address))
         }
@@ -119,7 +117,9 @@ struct DisassemblyPanel: View {
             DispatchQueue.main.async { sourceCache[location.path] = lines }
         }
         guard location.line >= 1 && location.line <= lines.count else { return "" }
-        return lines[location.line - 1].replacingOccurrences(of: "\t", with: "    ")
+        let kind = SourceKind(url: URL(fileURLWithPath: location.path))
+        return lines[location.line - 1].replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\t", with: String(repeating: " ", count: EditorStyle.tabSize(for: kind)))
     }
 }
 
@@ -215,40 +215,20 @@ struct CallStackPanel: View {
     var body: some View {
         let image = workspace.lastProduct?.image
         let s = debugger.snapshot
-        var frames: [(String, String, String)] = []
+        // Frames under the current one: the exception entry, or the caller found through LR.
+        var callers: [(name: String, address: UInt32, type: String)] = []
         if debugger.isActive {
             let current = image?.symbol(containing: s.r[15])?.name ?? "???"
-            frames.append((current, hex(s.r[15]), s.ipsr != 0 ? "Exception handler" : "void f()"))
+            callers.append((current, s.r[15], ""))
             if s.ipsr != 0 {
-                frames.append(("<\(exceptionName(Int(s.ipsr)))>", "exception frame", "EXC_RETURN " + hex(s.r[14])))
+                callers.append(("<\(exceptionName(Int(s.ipsr)))>", s.r[14], "EXC_RETURN"))
             } else if s.r[14] != 0xFFFF_FFFF, let caller = image?.symbol(containing: s.r[14] & ~1), caller.name != current {
-                frames.append((caller.name, hex(s.r[14] & ~1), "caller (from LR)"))
+                callers.append((caller.name, s.r[14] & ~1, ""))
             }
         }
-        return VStack(spacing: 0) {
-            tableHeader(["Name", "Location/Value", "Type"])
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(frames.enumerated()), id: \.offset) { index, frame in
-                        HStack(spacing: 0) {
-                            Image(systemName: index == 0 ? "arrowtriangle.right.fill" : "circle.fill")
-                                .font(.system(size: index == 0 ? 9 : 4))
-                                .foregroundColor(index == 0 ? .yellow : .gray).frame(width: 14)
-                            Text(frame.0).frame(width: 170, alignment: .leading)
-                            Text(frame.1).font(UVColors.mono).frame(width: 140, alignment: .leading)
-                            Text(frame.2).foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .font(UVColors.small).frame(height: 17)
-                    }
-                    if debugger.isActive {
-                        VariablesView(debugger: debugger, info: { workspace.lastProduct?.dwarf })
-                            .frame(minHeight: 160)
-                    }
-                }
-            }
-        }
-        .background(Color.white)
+        return VariablesView(debugger: debugger, info: { workspace.lastProduct?.dwarf },
+                             callers: callers)
+            .background(Color.white)
     }
 
     private func exceptionName(_ n: Int) -> String { ExceptionNumber.name(n) }

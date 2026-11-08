@@ -3,7 +3,8 @@ import SwiftUI
 /// µVision "Registers" window: Core / Banked / System / Internal.
 struct RegistersPanel: View {
     @ObservedObject var debugger: DebugController
-    @LocalState private var collapsed = Set<String>()
+    /// µVision opens with Core and Internal expanded, xPSR, Banked, System and FPU collapsed.
+    @LocalState private var collapsed: Set<String> = ["xPSR", "Banked", "System", "FPU", "FPSCR"]
     @LocalState private var editing: Int?
     @LocalState private var editText = ""
 
@@ -38,7 +39,7 @@ struct RegistersPanel: View {
                             flagRow("T", s.xpsr >> 24 & 1, p.xpsr >> 24 & 1)
                             let it = ((s.xpsr >> 25) & 3) | (((s.xpsr >> 10) & 0x3F) << 2)
                             let pit = ((p.xpsr >> 25) & 3) | (((p.xpsr >> 10) & 0x3F) << 2)
-                            flagRow("IT", it, pit)
+                            valueRow("IT", it == 0 ? "Disabled" : String(format: "0x%02X", it), changed: it != pit, level: 2)
                             flagRow("ISR", s.xpsr & 0x1FF, p.xpsr & 0x1FF)
                         }
                     }
@@ -127,19 +128,21 @@ struct RegistersPanel: View {
         valueRow(name, "\(value)", changed: value != previous, level: 2)
     }
 
+    /// A register that changed with the last step is shown with the whole row (name and value) selected,
+    /// as µVision does.
     private func valueRow(_ name: String, _ value: String, changed: Bool, level: Int) -> some View {
         HStack(spacing: 0) {
             Text(name).font(UVColors.small)
                 .frame(width: 120 - CGFloat(level) * 14 - 16, alignment: .leading)
-                .padding(.leading, CGFloat(level) * 14 + 16)
-            Text(value).font(UVColors.mono)
-                .foregroundColor(changed ? .white : .black)
-                .padding(.horizontal, 3)
-                .background(changed ? UVColors.changed : .clear)
                 .padding(.leading, 3)
-            Spacer()
+            Text(value).font(UVColors.small)
+                .padding(.leading, 6)
+            Spacer(minLength: 0)
         }
+        .foregroundColor(changed ? .white : .black)
         .frame(height: 17)
+        .background(changed ? UVColors.changed : .clear)
+        .padding(.leading, CGFloat(level) * 14 + 13)
         .contentShape(Rectangle())
     }
 
@@ -157,13 +160,12 @@ struct RegistersPanel: View {
             Text(title).font(.system(size: 11, weight: level == 0 ? .semibold : .regular))
                 .frame(width: 120 - CGFloat(level) * 14 - 18, alignment: .leading)
             if let value {
-                Text(value).font(UVColors.mono)
-                    .foregroundColor(changed ? .white : .black)
-                    .padding(.horizontal, 3)
-                    .background(changed ? UVColors.changed : .clear)
+                Text(value).font(UVColors.small).padding(.leading, 6)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
+        .foregroundColor(changed && value != nil ? .white : .black)
+        .background(changed && value != nil ? UVColors.changed : .clear)
         .padding(.leading, CGFloat(level) * 14 + 3)
         .frame(height: 18)
         if !isCollapsed {

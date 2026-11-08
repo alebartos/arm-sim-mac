@@ -8,6 +8,10 @@ struct VariablesView: View {
     let info: () -> DwarfInfo?
     var expressions: [String]?
     @LocalState private var expanded = Set<String>()
+    /// Call stack frames start expanded (their locals visible); this holds the ones the user closed.
+    @LocalState private var collapsedFrames = Set<String>()
+    /// Frames above the current function (caller from LR, exception entry), shown under it.
+    var callers: [(name: String, address: UInt32, type: String)] = []
 
     var body: some View {
         let _ = debugger.revision
@@ -54,25 +58,49 @@ struct VariablesView: View {
                     ?? ValueNode(id: "expr:\(e)", name: e, typeName: "", valueText: "<cannot evaluate>", address: nil, children: [])
             }, nil)
         }
-        guard let function = info.function(containing: pc) else {
-            return ([], "No debug information for the code at PC.")
+        // µVision "Call Stack + Locals": one row per frame, its parameters and locals as children.
+        let function = info.function(containing: pc)
+        let locals = function?.visibleVariables(at: pc).map { info.value(of: $0, registers: registers, read: read) } ?? []
+        var frames = [ValueNode(id: "frame:0", name: function?.name ?? callers.first?.name ?? "???",
+                                typeName: function?.signature ?? "", valueText: String(format: "0x%08X", pc),
+                                address: nil, children: locals)]
+        // Like µVision, callers without debug information (startup code, C library) are not listed.
+        for (index, caller) in callers.dropFirst().enumerated() {
+            let callerFunction = info.functions.first { $0.name == caller.name }
+            guard callerFunction != nil || caller.name.hasPrefix("<") else { continue }
+            frames.append(ValueNode(id: "frame:\(index + 1)", name: caller.name, typeName: callerFunction?.signature ?? caller.type,
+                                    valueText: String(format: "0x%08X", caller.address), address: nil, children: []))
         }
-        let variables = function.visibleVariables(at: pc)
-        let nodes = variables.map { info.value(of: $0, registers: registers, read: read) }
-        return (nodes, nodes.isEmpty ? "\(function.name)(): no parameters or locals" : nil)
+        return (frames, nil)
+    }
+
+    private func isOpen(_ node: ValueNode) -> Bool {
+        node.id.hasPrefix("frame:") ? !collapsedFrames.contains(node.id) : expanded.contains(node.id)
+    }
+
+    private func toggle(_ node: ValueNode) {
+        if node.id.hasPrefix("frame:") {
+            if collapsedFrames.contains(node.id) { collapsedFrames.remove(node.id) } else { collapsedFrames.insert(node.id) }
+        } else if expanded.contains(node.id) {
+            expanded.remove(node.id)
+        } else {
+            expanded.insert(node.id)
+        }
     }
 
     private func tree(_ node: ValueNode, level: Int) -> AnyView {
-        let isOpen = expanded.contains(node.id)
+        let isOpen = isOpen(node)
+        let isFrame = node.id.hasPrefix("frame:")
         return AnyView(VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 HStack(spacing: 2) {
                     Spacer().frame(width: CGFloat(level) * 12)
                     if node.children.isEmpty {
-                        Image(systemName: "circle.fill").font(.system(size: 4)).foregroundColor(.blue).frame(width: 12)
+                        Image(systemName: isFrame ? "diamond.fill" : "circle.fill").font(.system(size: isFrame ? 7 : 4))
+                            .foregroundColor(isFrame ? Color(red: 0.8, green: 0.2, blue: 0.6) : .blue).frame(width: 12)
                     } else {
                         Button {
-                            if isOpen { expanded.remove(node.id) } else { expanded.insert(node.id) }
+                            toggle(node)
                         } label: {
                             Image(systemName: isOpen ? "minus.square" : "plus.square").font(.system(size: 9)).foregroundColor(.gray)
                         }
@@ -91,9 +119,7 @@ struct VariablesView: View {
             .frame(height: 17)
             .contentShape(Rectangle())
             .onTapGesture(count: 2) {
-                if !node.children.isEmpty {
-                    if isOpen { expanded.remove(node.id) } else { expanded.insert(node.id) }
-                }
+                if !node.children.isEmpty { toggle(node) }
             }
             if isOpen {
                 ForEach(node.children, id: \.id) { child in

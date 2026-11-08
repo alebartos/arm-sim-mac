@@ -476,13 +476,82 @@ enum DebugInfoBuilder {
                 let bytes = parts[0][parts[0].index(after: colon)...].trimmingCharacters(in: .whitespaces)
                 var operands = parts.count > 2 ? parts[2...].joined(separator: " ") : ""
                 if let comment = operands.range(of: "@ imm") { operands = String(operands[..<comment.lowerBound]) }
+                let raw = bytes.replacingOccurrences(of: " ", with: "").uppercased()
+                let (mnemonic, keilOperands) = KeilDisassembly.format(mnemonic: String(parts[1]),
+                                                                      operands: operands.trimmingCharacters(in: .whitespaces),
+                                                                      wide: raw.count == 8)
                 info.indexByAddress[address] = info.instructions.count
-                info.instructions.append(DisassemblyLine(
-                    address: address, bytes: bytes.replacingOccurrences(of: " ", with: "").uppercased(),
-                    mnemonic: String(parts[1]).uppercased(),
-                    operands: operands.trimmingCharacters(in: .whitespaces)))
+                info.instructions.append(DisassemblyLine(address: address, bytes: raw, mnemonic: mnemonic, operands: keilOperands))
             }
         }
+    }
+}
+
+// MARK: - µVision disassembly syntax
+
+/// Rewrites llvm-objdump's Thumb syntax the way µVision's Disassembly window prints it:
+/// `MOVW r0,#0xC090`, `STR r1,[r0,#0x00]`, `B 0x000001F0`, `BL.W SystemInit (0x0000012C)`, `DSB.W`.
+enum KeilDisassembly {
+    static func format(mnemonic rawMnemonic: String, operands raw: String, wide: Bool) -> (String, String) {
+        var mnemonic = rawMnemonic.uppercased()
+        var operands = raw
+        let base = mnemonic.split(separator: ".").first.map(String.init) ?? mnemonic
+
+        // Branches: target address (and symbol for calls) from "0x12c <SystemInit>".
+        let isCall = base == "BL" || base == "BLX"
+        let isBranch = isCall || base == "B" || base == "CBZ" || base == "CBNZ"
+            || (base.hasPrefix("B") && base.count == 3 && conditions.contains(String(base.dropFirst())))
+        if isBranch, let target = operands.range(of: #"0x[0-9a-fA-F]+"#, options: .regularExpression) {
+            let address = UInt32(operands[target].dropFirst(2), radix: 16) ?? 0
+            let prefix = operands[..<target.lowerBound]
+            var symbol: String?
+            if let open = operands.range(of: "<"), let close = operands.range(of: ">", range: open.upperBound..<operands.endIndex) {
+                let name = String(operands[open.upperBound..<close.lowerBound])
+                if !name.contains("+") { symbol = name }
+            }
+            let hex = String(format: "0x%08X", address)
+            operands = String(prefix).replacingOccurrences(of: ", ", with: ",")
+                + (isCall ? (symbol.map { "\($0) (\(hex))" } ?? hex) : hex)
+            if isCall && wide && !mnemonic.hasSuffix(".W") { mnemonic += ".W" }
+            return (mnemonic, operands)
+        }
+        // Barriers: "dsb sy" -> "DSB.W".
+        if ["DSB", "DMB", "ISB"].contains(base) {
+            return (base + ".W", operands == "sy" ? "" : operands)
+        }
+        operands = operands.replacingOccurrences(of: ", ", with: ",")
+        // Immediates in hex: "#49296" -> "#0xC090", "#1" -> "#0x01".
+        operands = replace(#"#(-?)(0x[0-9a-fA-F]+|\d+)"#, in: operands) { groups in
+            let negative = groups[1] == "-"
+            let text = groups[2]
+            let value = text.hasPrefix("0x") ? UInt64(text.dropFirst(2), radix: 16) ?? 0 : UInt64(text) ?? 0
+            return "#" + (negative ? "-" : "") + String(format: value < 0x100 ? "0x%02X" : "0x%X", value)
+        }
+        // Loads/stores with no offset: "[r0]" -> "[r0,#0x00]".
+        if base.hasPrefix("LDR") || base.hasPrefix("STR") {
+            operands = replace(#"\[(\w+)\](?!,)"#, in: operands) { "[\($0[1]),#0x00]" }
+        }
+        return (mnemonic, operands)
+    }
+
+    private static let conditions: Set<String> = ["EQ", "NE", "CS", "HS", "CC", "LO", "MI", "PL", "VS", "VC", "HI", "LS",
+                                                  "GE", "LT", "GT", "LE", "AL"]
+
+    private static func replace(_ pattern: String, in text: String, _ transform: ([String]) -> String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        var result = ""
+        var last = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+            let groups = (0..<match.numberOfRanges).map { i -> String in
+                let r = match.range(at: i)
+                return r.location == NSNotFound ? "" : ns.substring(with: r)
+            }
+            result += transform(groups)
+            last = match.range.location + match.range.length
+        }
+        return result + ns.substring(from: last)
     }
 }
 

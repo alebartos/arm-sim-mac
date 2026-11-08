@@ -130,6 +130,10 @@ struct DwarfFunction {
     /// Register used as frame base (13 = SP, 7 = R7).
     let frameBaseRegister: Int
     let variables: [DwarfVariable]
+    var returnType: DwarfType?
+
+    /// µVision's Call Stack type column: "int f()", "void f()".
+    var signature: String { "\(returnType?.displayName ?? "void") f()" }
 
     func contains(_ pc: UInt32) -> Bool { pc >= low && pc < high }
 
@@ -455,7 +459,8 @@ final class DwarfInfo {
         }
         walk(die, range: nil)
         return DwarfFunction(name: name, low: symbol.address, high: symbol.address &+ size,
-                             frameBaseRegister: frameBase, variables: variables)
+                             frameBaseRegister: frameBase, variables: variables,
+                             returnType: die.reference("DW_AT_type").flatMap { table.types[$0] })
     }
 
     // MARK: Evaluation
