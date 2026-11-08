@@ -853,36 +853,3 @@ struct DeviceSelectionDialog: View {
         }
     }
 }
-
-// MARK: - Peripherals > Core Peripherals
-
-struct FaultReportsWindow: View {
-    @ObservedObject var debugger = Workspace.shared.debugger
-
-    private let cfsrBits: [(Int, String)] = [
-        (0, "IACCVIOL"), (1, "DACCVIOL"), (3, "MUNSTKERR"), (4, "MSTKERR"), (7, "MMARVALID"),
-        (8, "IBUSERR"), (9, "PRECISERR"), (10, "IMPRECISERR"), (11, "UNSTKERR"), (12, "STKERR"), (15, "BFARVALID"),
-        (16, "UNDEFINSTR"), (17, "INVSTATE"), (18, "INVPC"), (19, "NOCP"), (24, "UNALIGNED"), (25, "DIVBYZERO"),
-    ]
-
-    var body: some View {
-        let s = debugger.snapshot
-        Form {
-            Section("Hard Fault Status Register") {
-                LabeledContent("HFSR", value: hex(s.hfsr))
-                Toggle("VECTBL", isOn: .constant(s.hfsr & 2 != 0)).disabled(true)
-                Toggle("FORCED", isOn: .constant(s.hfsr & (1 << 30) != 0)).disabled(true)
-            }
-            Section("Configurable Fault Status Register") {
-                LabeledContent("CFSR", value: hex(s.cfsr))
-                ForEach(cfsrBits, id: \.0) { bit, name in
-                    if s.cfsr & (1 << UInt32(bit)) != 0 { Text("● \(name)").foregroundColor(.red) }
-                }
-                LabeledContent("BFAR", value: hex(s.bfar))
-            }
-        }
-        .font(UVColors.mono)
-        .padding()
-        .frame(minWidth: 340, minHeight: 360)
-    }
-}

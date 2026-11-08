@@ -263,7 +263,7 @@ struct PeripheralsMenu: View {
                 Button("Power Control") { svd("SYSCON") }
             }
             Button("Flash Accelerator Module") { svd("SYSCON") }
-            Button("Pin Connect Block") { svd("PINCONNECT") }
+            Button("Pin Connect Block") { openWindow(id: "pinconnect") }
             Menu("GPIO Fast Interface") {
                 ForEach(0..<5) { port in Button("Port \(port)") { openWindow(id: "gpio", value: port) } }
             }

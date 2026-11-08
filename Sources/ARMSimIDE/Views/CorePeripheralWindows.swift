@@ -219,3 +219,223 @@ struct SysTickWindow: View {
         .navigationTitle("System Tick Timer")
     }
 }
+
+// MARK: - Fault Reports
+
+/// Peripherals ▸ Core Peripherals ▸ Fault Reports, as µVision's dialog: SCB fault status and address registers.
+/// Status bits are write-one-to-clear: unchecking a box clears the bit.
+struct FaultReportsWindow: View {
+    @ObservedObject var debugger = Workspace.shared.debugger
+
+    private static let cfsr: UInt32 = 0xE000_ED28, hfsr: UInt32 = 0xE000_ED2C, dfsr: UInt32 = 0xE000_ED30
+    private static let mmfar: UInt32 = 0xE000_ED34, bfar: UInt32 = 0xE000_ED38
+
+    /// Two-column grid of status bits (name, bit number in `register`), as µVision lays them out.
+    private func bits(_ value: UInt32, _ register: UInt32, _ list: [(String, Int)], bus: RegisterBus) -> some View {
+        let rows = stride(from: 0, to: list.count, by: 2).map { Array(list[$0..<min($0 + 2, list.count)]) }
+        return Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 2) {
+            ForEach(rows.indices, id: \.self) { r in
+                GridRow {
+                    ForEach(rows[r], id: \.1) { name, bit in
+                        bitToggle(name, value, bit) { on in if !on { bus.write(register, 1 << UInt32(bit)) } }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Grid row with the label right-aligned on the colon, as µVision.
+    private func field(_ title: String, _ value: UInt32, digits: Int = 8, commit: @escaping (UInt32) -> Void) -> some View {
+        GridRow {
+            Text(title + ":").gridColumnAlignment(.trailing)
+            HexField(value: value, digits: digits, onCommit: commit).frame(width: digits > 4 ? 86 : 50)
+        }
+    }
+
+    private func group<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        GroupBox(title) {
+            VStack(alignment: .leading, spacing: 4) { content() }
+                .padding(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    var body: some View {
+        let _ = debugger.revision
+        let bus = RegisterBus(debugger: debugger)
+        let cfsr = bus.read(Self.cfsr), hfsr = bus.read(Self.hfsr), dfsr = bus.read(Self.dfsr)
+        let mmfsr = cfsr & 0xFF, bfsr = (cfsr >> 8) & 0xFF, ufsr = cfsr >> 16
+        VStack(alignment: .leading, spacing: 6) {
+            group("Memory Manage Faults") {
+                Grid(alignment: .leading, horizontalSpacing: 4, verticalSpacing: 3) {
+                    field("MM_FAULT_ADDR", bus.read(Self.mmfar)) { bus.write(Self.mmfar, $0) }
+                    field("MM_FAULT_STAT", mmfsr, digits: 2) { bus.write(Self.cfsr, $0 & 0xFF) }
+                }
+                bits(cfsr, Self.cfsr, [("IACCVIOL", 0), ("MUNSTKERR", 3), ("DACCVIOL", 1), ("MSTKERR", 4), ("MMARVALID", 7)], bus: bus)
+            }
+            group("Bus Faults") {
+                Grid(alignment: .leading, horizontalSpacing: 4, verticalSpacing: 3) {
+                    field("BUS_FAULT_ADDR", bus.read(Self.bfar)) { bus.write(Self.bfar, $0) }
+                    field("BUS_FAULT_STAT", bfsr, digits: 2) { bus.write(Self.cfsr, ($0 & 0xFF) << 8) }
+                }
+                bits(cfsr, Self.cfsr, [("IBUSERR", 8), ("UNSTKERR", 11), ("PRECISERR", 9), ("STKERR", 12),
+                                       ("IMPRECISERR", 10), ("BFARVALID", 15)], bus: bus)
+            }
+            group("Usage Faults") {
+                registerField("USG_FAULT_STAT", ufsr, digits: 4) { bus.write(Self.cfsr, ($0 & 0xFFFF) << 16) }
+                bits(cfsr, Self.cfsr, [("UNDEFINSTR", 16), ("NOCP", 19), ("INVSTATE", 17), ("UNALIGNED", 24),
+                                       ("INVPC", 18), ("DIVBYZERO", 25)], bus: bus)
+            }
+            group("Hard Faults") {
+                registerField("HARD_FAULT_STAT", hfsr) { bus.write(Self.hfsr, $0) }
+                bits(hfsr, Self.hfsr, [("VECTTBL", 1), ("DEBUGEVT", 31), ("FORCED", 30)], bus: bus)
+            }
+            group("Debug Faults") {
+                registerField("DBG_FAULT_STAT", dfsr) { bus.write(Self.dfsr, $0) }
+                bits(dfsr, Self.dfsr, [("HALTED", 0), ("VCATCH", 3), ("BKPT", 1), ("EXTERNAL", 4), ("DWTTRAP", 2)], bus: bus)
+            }
+        }
+        .font(.system(size: 11))
+        .disabled(debugger.isRunning)
+        .padding(10)
+        .frame(width: 270)
+        .fixedSize()
+        .navigationTitle("Fault Reports")
+    }
+}
+
+// MARK: - Pin Connect Block
+
+/// Peripherals ▸ Pin Connect Block (LPC17xx), as µVision's dialog: per-pin function, mode and open-drain
+/// from PINSEL / PINMODE / PINMODE_OD. Function names come from the device SVD when it is loaded.
+struct PinConnectWindow: View {
+    @ObservedObject var debugger = Workspace.shared.debugger
+    @ObservedObject var viewer = SystemViewerState.shared
+    @LocalState private var selected = "P0.0"
+
+    private static let base: UInt32 = 0x4002_C000
+
+    struct Pin: Identifiable {
+        let port: Int, number: Int
+        /// Names of functions 0-3 (function 0 is always the GPIO).
+        let functions: [String]
+        var id: String { "P\(port).\(number)" }
+        var selRegister: UInt32 { PinConnectWindow.base + UInt32(port * 2 + number / 16) * 4 }
+        var modeRegister: UInt32 { selRegister + 0x40 }
+        var odRegister: UInt32 { PinConnectWindow.base + 0x68 + UInt32(port) * 4 }
+        var shift: UInt32 { UInt32(number % 16) * 2 }
+    }
+
+    /// LPC176x pins present in the 100-pin package (UM10360 chapter 8), used when no SVD is loaded.
+    private static let defaultPins: [(Int, [Int])] = [
+        (0, Array(0...11) + Array(15...30)), (1, [0, 1, 4, 8, 9, 10] + Array(14...31)), (2, Array(0...13)),
+        (3, [25, 26]), (4, [28, 29]),
+    ]
+
+    private var pins: [Pin] {
+        func gpio(_ p: Int, _ n: Int) -> String { "GPIO Port \(p).\(n)" }
+        if let periph = viewer.svd?.peripheral(named: "PINCONNECT") {
+            var result: [Pin] = []
+            for reg in periph.registers where reg.name.hasPrefix("PINSEL") {
+                for field in reg.fields {
+                    let parts = field.name.dropFirst().split(separator: "_")
+                    guard field.name.hasPrefix("P"), parts.count == 2, let p = Int(parts[0]), let n = Int(parts[1]) else { continue }
+                    var names = (0..<4).map { v -> String in
+                        guard let e = field.enumeratedValues.first(where: { $0.value == UInt64(v) }) else { return "Reserved" }
+                        let text = e.description.isEmpty ? e.name : e.description
+                        return text.hasSuffix(".") ? String(text.dropLast()) : text
+                    }
+                    names[0] = gpio(p, n)
+                    result.append(Pin(port: p, number: n, functions: names))
+                }
+            }
+            if !result.isEmpty { return result.sorted { ($0.port, $0.number) < ($1.port, $1.number) } }
+        }
+        return Self.defaultPins.flatMap { p, numbers in
+            numbers.map { Pin(port: p, number: $0, functions: [gpio(p, $0), "Function 1", "Function 2", "Function 3"]) }
+        }
+    }
+
+    private static let modes = ["Pull-up enabled", "Repeater mode", "No pull-up/down", "Pull-down enabled"]
+    private static let drains = ["Normal Mode", "Open Drain Mode"]
+
+    private func function(_ pin: Pin, _ bus: RegisterBus) -> Int { Int((bus.read(pin.selRegister) >> pin.shift) & 3) }
+    private func mode(_ pin: Pin, _ bus: RegisterBus) -> Int { Int((bus.read(pin.modeRegister) >> pin.shift) & 3) }
+    private func drain(_ pin: Pin, _ bus: RegisterBus) -> Int { Int((bus.read(pin.odRegister) >> UInt32(pin.number)) & 1) }
+
+    private func setField(_ address: UInt32, shift: UInt32, width: UInt32, _ value: Int, _ bus: RegisterBus) {
+        let mask: UInt32 = ((1 << width) - 1) << shift
+        bus.write(address, (bus.read(address) & ~mask) | ((UInt32(value) << shift) & mask))
+    }
+
+    private func picker(_ value: Int, _ labels: [String], width: CGFloat, set: @escaping (Int) -> Void) -> some View {
+        Picker("", selection: Binding(get: { value }, set: set)) {
+            ForEach(labels.indices, id: \.self) { Text(labels[$0]).tag($0) }
+        }
+        .labelsHidden()
+        .frame(width: width)
+    }
+
+    private func registers(_ name: String, _ indices: [Int], offset: UInt32, _ bus: RegisterBus) -> some View {
+        Grid(alignment: .trailing, horizontalSpacing: 4, verticalSpacing: 3) {
+            ForEach(indices, id: \.self) { i in
+                let address = Self.base + offset + UInt32(i) * 4
+                GridRow {
+                    Text("\(name)\(i):")
+                    HexField(value: bus.read(address)) { bus.write(address, $0) }.frame(width: 86)
+                }
+            }
+        }
+    }
+
+    var body: some View {
+        let _ = debugger.revision
+        let bus = RegisterBus(debugger: debugger)
+        let all = pins
+        let pin = all.first { $0.id == selected } ?? all[0]
+        VStack(alignment: .leading, spacing: 6) {
+            Table(all, selection: Binding(get: { selected }, set: { if let id = $0 { selected = id } })) {
+                TableColumn("Pin") { Text($0.id) }.width(40)
+                TableColumn("Function") { p in Text(p.functions[function(p, bus)]) }.width(120)
+                TableColumn("Mode") { p in Text(Self.modes[mode(p, bus)]) }.width(100)
+                TableColumn("Open Drain") { p in Text(drain(p, bus) == 1 ? "Open Drain" : "Normal") }.width(70)
+            }
+            .frame(height: 150)
+            GroupBox("Selected Pin: \(pin.id)") {
+                HStack(alignment: .top, spacing: 10) {
+                    picker(function(pin, bus), pin.functions, width: 180) { setField(pin.selRegister, shift: pin.shift, width: 2, $0, bus) }
+                    Grid(alignment: .trailing, horizontalSpacing: 4, verticalSpacing: 3) {
+                        GridRow {
+                            Text("Mode:")
+                            picker(mode(pin, bus), Self.modes, width: 135) { setField(pin.modeRegister, shift: pin.shift, width: 2, $0, bus) }
+                        }
+                        GridRow {
+                            Text("OD:")
+                            picker(drain(pin, bus), Self.drains, width: 135) {
+                                setField(pin.odRegister, shift: UInt32(pin.number), width: 1, $0, bus)
+                            }
+                        }
+                    }
+                }
+                .padding(2)
+            }
+            HStack(alignment: .top, spacing: 6) {
+                GroupBox("Pin Function Select") { registers("PINSEL", Array(0...10), offset: 0, bus).padding(2) }
+                GroupBox("Pin Mode Select") { registers("PINMODE", Array(0...9), offset: 0x40, bus).padding(2) }
+            }
+            GroupBox("Open Drain Mode Control") {
+                HStack(alignment: .top, spacing: 10) {
+                    registers("PINMODE_OD", [0, 1, 2], offset: 0x68, bus)
+                    registers("PINMODE_OD", [3, 4], offset: 0x68, bus)
+                }
+                .padding(2)
+            }
+        }
+        .font(.system(size: 11))
+        .disabled(debugger.isRunning)
+        .padding(10)
+        .frame(width: 440)
+        .fixedSize()
+        .navigationTitle("Pin Connect Block")
+    }
+}

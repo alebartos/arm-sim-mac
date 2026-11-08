@@ -23,6 +23,9 @@ struct ARMSimApp: App {
         Window("Nested Vectored Interrupt Controller (NVIC)", id: "nvic") { NVICWindow() }
         Window("System Tick Timer (SysTick)", id: "systick") { SysTickWindow() }
         Window("Fault Reports", id: "faults") { FaultReportsWindow() }
+            .windowResizability(.contentSize)
+        Window("Pin Connect Block", id: "pinconnect") { PinConnectWindow() }
+            .windowResizability(.contentSize)
         WindowGroup("GPIO Fast Interface", id: "gpio", for: Int.self) { $port in GPIOWindow(port: port ?? 2) }
             .windowResizability(.contentSize)
         WindowGroup("Timer", id: "timer", for: Int.self) { $index in TimerWindow(index: index ?? 0) }
@@ -383,6 +386,7 @@ extension SmokeTest {
                 case "nvic": view = AnyView(NVICWindow())
                 case "systick": view = AnyView(SysTickWindow())
                 case "faults": view = AnyView(FaultReportsWindow())
+                case "pinconnect": view = AnyView(PinConnectWindow())
                 default: view = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
                 }
                 let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
