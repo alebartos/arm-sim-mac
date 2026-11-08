@@ -49,6 +49,10 @@ struct EditorConfig: Codable, Equatable {
     // Text Completion tab
     var templates: [String: [Template]] = EditorConfig.defaultTemplates
 
+    // Text Completion tab: symbols list after `completionCharacters` typed characters.
+    var completionSymbols = true
+    var completionCharacters = 3
+
     // Other tab
     var openMostRecentProject = true
 

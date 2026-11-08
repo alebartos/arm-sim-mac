@@ -184,6 +184,70 @@ final class EditorTextView: NSTextView {
     var kind: SourceKind = .other
     private var config: EditorConfig { EditorSettings.shared.config }
 
+    // MARK: Code completion (Edit ▸ Configuration ▸ Text Completion ▸ Symbols after N Characters)
+
+    private var completing = false
+
+    override func didChangeText() {
+        super.didChangeText()
+        let config = self.config
+        guard config.completionSymbols, !completing, kind != .other, selectedRange().length == 0 else { return }
+        let word = partialWord()
+        // Open the list once, when the word reaches the threshold; it then filters itself while typing.
+        guard word.length == max(config.completionCharacters, 1) else { return }
+        let text = string as NSString
+        guard let last = UnicodeScalar(text.character(at: selectedRange().location - 1)),
+              CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).contains(last) else { return }
+        DispatchQueue.main.async { [weak self] in self?.complete(nil) }
+    }
+
+    private func partialWord() -> NSRange {
+        let text = string as NSString
+        let end = selectedRange().location
+        var start = end
+        let word = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        while start > 0, let u = UnicodeScalar(text.character(at: start - 1)), word.contains(u) { start -= 1 }
+        return NSRange(location: start, length: end - start)
+    }
+
+    override var rangeForUserCompletion: NSRange { partialWord() }
+
+    override func insertCompletion(_ word: String, forPartialWordRange charRange: NSRange, movement: Int, isFinal flag: Bool) {
+        completing = !flag
+        super.insertCompletion(word, forPartialWordRange: charRange, movement: movement, isFinal: flag)
+        if flag { completing = false }
+    }
+
+    /// Candidates: language keywords, the program's functions, variables and symbols (last build), and
+    /// identifiers of this file.
+    override func completions(forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>) -> [String]? {
+        let prefix = (string as NSString).substring(with: charRange)
+        guard !prefix.isEmpty else { return nil }
+        var words = Set<String>()
+        if kind == .asm {
+            words.formUnion(["AREA", "EXPORT", "IMPORT", "ENTRY", "PROC", "ENDP", "DCD", "DCB", "DCW", "SPACE", "EQU",
+                             "ALIGN", "THUMB", "PRESERVE8", "LDR", "STR", "MOV", "PUSH", "POP", "BX", "BL", "CMP", "B"])
+        } else {
+            words.formUnion(SyntaxHighlighter.cKeywords)
+        }
+        if let product = ws.lastProduct {
+            for f in product.dwarf?.functions ?? [] { words.insert(f.name) }
+            for v in product.dwarf?.globals() ?? [] { words.insert(v.name) }
+            for s in product.image.symbols where !s.name.hasPrefix("$") && !s.name.hasPrefix(".") { words.insert(s.name) }
+        }
+        if let regex = try? NSRegularExpression(pattern: "[A-Za-z_][A-Za-z0-9_]{3,}") {
+            let text = string as NSString
+            for m in regex.matches(in: string, range: NSRange(location: 0, length: text.length)) where m.range != charRange {
+                words.insert(text.substring(with: m.range))
+            }
+        }
+        let lower = prefix.lowercased()
+        let result = words.filter { $0.count > prefix.count && $0.lowercased().hasPrefix(lower) }
+            .sorted { $0.lowercased() < $1.lowercased() }
+        index.pointee = result.isEmpty ? -1 : 0
+        return result.isEmpty ? nil : Array(result.prefix(300))
+    }
+
     /// Insert spaces for tabs: spaces up to the next tab stop.
     override func insertTab(_ sender: Any?) {
         let type = config.fileType(kind)
@@ -641,7 +705,7 @@ enum SyntaxHighlighter {
     static let directive = NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1)
     static let register = NSColor(calibratedRed: 0.55, green: 0.25, blue: 0, alpha: 1)
 
-    private static let cKeywords = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+    static let cKeywords = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double",
         "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict",
         "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
         "volatile", "while", "_Bool", "bool", "true", "false", "NULL", "uint8_t", "uint16_t", "uint32_t", "uint64_t",

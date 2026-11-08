@@ -392,12 +392,19 @@ struct ConfigurationDialog: View {
             VStack(spacing: 10) {
                 GroupBox("Show Code Completion List for") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Struct / Class Members", isOn: .constant(false))
-                        Toggle("Function Parameters", isOn: .constant(false))
-                        Toggle("Symbols after 3 Characters", isOn: .constant(false))
-                        Toggle("ENTER/TAB as fill-up character", isOn: .constant(false))
+                        Group {
+                            Toggle("Struct / Class Members", isOn: .constant(false))
+                            Toggle("Function Parameters", isOn: .constant(false))
+                        }
+                        .disabled(true).help("Not available yet")
+                        HStack(spacing: 4) {
+                            Toggle("Symbols after", isOn: $config.completionSymbols)
+                            TextField("", value: $config.completionCharacters, format: .number).textFieldStyle(.squareBorder).frame(width: 30)
+                            Stepper("", value: $config.completionCharacters, in: 1...9).labelsHidden()
+                            Text("Characters")
+                        }
+                        Toggle("ENTER/TAB as fill-up character", isOn: .constant(false)).disabled(true).help("Not available yet")
                     }
-                    .disabled(true).help("Code completion is not available yet")
                     .frame(maxWidth: .infinity, alignment: .leading).padding(2)
                 }
                 GroupBox("Dynamic Syntax Checking") {
