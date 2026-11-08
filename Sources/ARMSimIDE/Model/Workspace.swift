@@ -206,6 +206,48 @@ final class Workspace: ObservableObject {
         loadUVTarget(saved < uvTargets.count ? saved : 0, url: url)
         didOpen(url)
         loadUVOptions()
+        restoreUVGuiDocuments(projectURL: url)
+    }
+
+    /// µVision's per-user layout file: <project>.uvguix.<user>; ours if present, else the newest one.
+    static func uvGuiURL(projectURL url: URL) -> URL? {
+        let dir = url.deletingLastPathComponent()
+        let prefix = url.deletingPathExtension().lastPathComponent + ".uvguix."
+        let mine = dir.appendingPathComponent(prefix + NSUserName())
+        if FileManager.default.fileExists(atPath: mine.path) { return mine }
+        let candidates = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension.lowercased() != "xml" }
+        return candidates.max {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a < b
+        }
+    }
+
+    /// Reopen the editor tabs listed in the .uvguix (<MDIGroups><MDIGroup><Doc>), the active one at its line.
+    private func restoreUVGuiDocuments(projectURL url: URL) {
+        guard documents.isEmpty, let dir = projectDirectory, let gui = Self.uvGuiURL(projectURL: url),
+              let xml = try? XMLDocument(contentsOf: gui, options: []),
+              let group = (try? xml.nodes(forXPath: "//MDIGroups/MDIGroup"))?.first else { return }
+        func text(_ path: String, _ node: XMLNode) -> String? {
+            (try? node.nodes(forXPath: path))?.first?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let active = Int(text("ActiveTab", group) ?? "") ?? 0
+        var opened: [(index: Int, url: URL, line: Int)] = []
+        for (index, doc) in ((try? group.nodes(forXPath: "Doc")) ?? []).enumerated() {
+            guard var name = text("Name", doc), !name.isEmpty else { continue }
+            name = name.replacingOccurrences(of: "\\", with: "/")
+            if name.hasPrefix("./") { name.removeFirst(2) }
+            // Windows absolute paths (C:/...) do not exist here.
+            guard !name.contains(":") else { continue }
+            let file = name.hasPrefix("/") ? URL(fileURLWithPath: name) : dir.appendingPathComponent(name).standardizedFileURL
+            guard FileManager.default.fileExists(atPath: file.path) else { continue }
+            openDocument(file)
+            opened.append((index, file, Int(text("CurrentLine", doc) ?? "") ?? 1))
+        }
+        if let target = opened.first(where: { $0.index == active }) ?? opened.first {
+            openDocument(target.url, line: max(target.line, 1))
+        }
     }
 
     /// Index of the target whose `<TargetOption><OPTFL><IsCurrentTarget>` is 1 in the project's .uvoptx.
