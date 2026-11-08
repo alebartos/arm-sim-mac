@@ -160,7 +160,7 @@ struct ManageMenuItems: View {
     private var ws: Workspace { Workspace.shared }
 
     var body: some View {
-        Button("Project Items…") { ws.addGroup() }.disabled(ws.project == nil)
+        Button("Project Items…") { ws.showManageItems = true }.disabled(ws.project == nil)
         Button("Multi-Project Workspace…") {}.disabled(true)
         Button("Run-Time Environment…") {}.disabled(true)
         Button("Select Software Packs…") {}.disabled(true)

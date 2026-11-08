@@ -43,6 +43,7 @@ struct MainWindow: View {
         .background(UVColors.chrome)
         .preferredColorScheme(.light)
         .sheet(isPresented: $workspace.showOptions) { OptionsDialog(workspace: workspace) }
+        .sheet(isPresented: $workspace.showManageItems) { ManageProjectItemsDialog(workspace: workspace) }
         .sheet(isPresented: $workspace.showDeviceSelection) {
             DeviceSelectionDialog(initial: workspace.project?.options.device ?? "ARMCM3") { selection in
                 guard let selection, var project = workspace.project else { return }

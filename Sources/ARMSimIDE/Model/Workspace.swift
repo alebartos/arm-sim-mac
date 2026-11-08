@@ -55,6 +55,8 @@ final class Workspace: ObservableObject {
     @Published private(set) var navigationForward: [SourceLocation] = []
     @Published var showOptions = false
     @Published var showDeviceSelection = false
+    /// Project ▸ Manage ▸ Project Items… dialog.
+    @Published var showManageItems = false
     /// Set by "New Project…": the device dialog is shown next, then the project is created.
     @Published var pendingNewProject: URL?
     @Published var showGoToLine = false

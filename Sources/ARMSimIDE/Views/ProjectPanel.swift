@@ -21,7 +21,7 @@ struct ProjectPanel: View {
                             Button("Options for Target '\(project.targetName)'…") { workspace.showOptions = true }
                             Divider()
                             Button("Add Group…") { workspace.addGroup() }
-                            Button("Manage Project Items…") { workspace.addGroup() }
+                            Button("Manage Project Items…") { workspace.showManageItems = true }
                             Button("Open Map File") { workspace.openMapFile() }
                             Button("Open Build Log") { WindowLayout.shared.showBuildOutput = true }
                             Button("Rebuild all target files") { workspace.build(rebuild: true) }
@@ -77,7 +77,7 @@ struct ProjectPanel: View {
                     Button("Rebuild all target files") { workspace.build(rebuild: true) }
                     Button("Build Target") { workspace.build() }
                     Divider()
-                    Button("Manage Project Items…") { workspace.addGroup() }
+                    Button("Manage Project Items…") { workspace.showManageItems = true }
                     Divider()
                     Toggle("Show Include File Dependencies", isOn: .constant(false)).disabled(true)
                     Divider()
@@ -111,7 +111,7 @@ struct ProjectPanel: View {
                 Button("Options for File '\(name)'…") {}.disabled(true)
                 Button("Remove File '\(name)'") { workspace.removeFile(file, fromGroup: group.id) }
                 Divider()
-                Button("Manage Project Items…") { workspace.addGroup() }
+                Button("Manage Project Items…") { workspace.showManageItems = true }
                 Button("Open \(name)") { if let url = workspace.url(forRelative: file) { workspace.openDocument(url) } }
                 Button("Open Build Log") { WindowLayout.shared.showBuildOutput = true }
                 Button("Rebuild all target files") { workspace.build(rebuild: true) }

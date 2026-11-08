@@ -182,7 +182,7 @@ struct BuildToolbar: View {
                        enabled: idle) { workspace.showOptions = true }
             ToolbarDivider()
             ToolButton(icon: "square.stack.3d.up.fill", help: "Manage Project Items…", tint: Color(red: 0.75, green: 0.2, blue: 0.2),
-                       enabled: idle) { workspace.addGroup() }
+                       enabled: idle) { workspace.showManageItems = true }
             ToolButton(icon: "square.on.square", help: "Manage Multi-Project Workspace…", enabled: false) {}
             ToolButton(icon: "diamond.fill", help: "Manage Run-Time Environment…", tint: Color(red: 0.1, green: 0.6, blue: 0.2),
                        enabled: false) {}
