@@ -33,7 +33,7 @@ struct ConfigWizardView: View {
             .background(UVColors.chrome)
             .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.border), alignment: .bottom)
 
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if rows.isEmpty {
                         Text("No configuration items found.").font(UVColors.small).foregroundColor(.secondary).padding(6)

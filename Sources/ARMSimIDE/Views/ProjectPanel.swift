@@ -11,7 +11,7 @@ struct ProjectPanel: View {
     @LocalState private var selectedFile: String?
 
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
+        TwoAxisScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if let project = workspace.project {
                     row(level: 0, icon: "folder.badge.gearshape", color: .orange, text: "Project: \(project.name)", bold: true)

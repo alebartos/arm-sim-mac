@@ -5,6 +5,7 @@ import SwiftUI
 struct CodeEditor: NSViewRepresentable {
     @ObservedObject var document: SourceDocument
     var breakpoints: Set<Int>
+    var disabledBreakpoints: Set<Int> = []
     var bookmarks: Set<Int> = []
     var codeLines: Set<Int>
     var executedLines: Set<Int> = []
@@ -26,6 +27,7 @@ struct CodeEditor: NSViewRepresentable {
 
         let textView = NSTextView(frame: .zero, textContainer: container)
         textView.isRichText = false
+        textView.usesFindBar = true
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -34,7 +36,8 @@ struct CodeEditor: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.smartInsertDeleteEnabled = false
         textView.font = EditorStyle.font
-        textView.typingAttributes = [.font: EditorStyle.font, .foregroundColor: NSColor.black]
+        let paragraph = EditorStyle.paragraph(for: document.kind)
+        textView.typingAttributes = [.font: EditorStyle.font, .foregroundColor: NSColor.black, .paragraphStyle: paragraph]
         textView.backgroundColor = .white
         textView.insertionPointColor = .black
         textView.isHorizontallyResizable = true
@@ -45,13 +48,9 @@ struct CodeEditor: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 4, height: 2)
         textView.selectedTextAttributes = [.backgroundColor: NSColor(calibratedRed: 0.2, green: 0.45, blue: 0.85, alpha: 1),
                                            .foregroundColor: NSColor.white]
-        let tabStops = (1...40).map { NSTextTab(textAlignment: .left, location: CGFloat($0) * EditorStyle.charWidth * 4) }
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = tabStops
-        paragraph.defaultTabInterval = EditorStyle.charWidth * 4
         textView.defaultParagraphStyle = paragraph
 
-        let scroll = NSScrollView()
+        let scroll = EditorScrollView()
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
@@ -64,8 +63,12 @@ struct CodeEditor: NSViewRepresentable {
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
 
+        // No soft wrap: lines run past the right edge like in µVision.
+        container.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        container.widthTracksTextView = false
         textView.delegate = context.coordinator
         context.coordinator.textView = textView
+        EditorCommands.lastEditor = textView
         context.coordinator.gutter = gutter
         context.coordinator.load(document.text)
         return scroll
@@ -81,6 +84,7 @@ struct CodeEditor: NSViewRepresentable {
             coordinator.load(document.text)
         }
         gutter.breakpoints = breakpoints
+        gutter.disabledBreakpoints = disabledBreakpoints
         gutter.bookmarks = bookmarks
         gutter.codeLines = codeLines
         gutter.executedLines = executedLines
@@ -131,6 +135,7 @@ struct CodeEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView, let gutter else { return }
+            EditorCommands.lastEditor = textView
             let location = textView.selectedRange().location
             let line = gutter.lineNumber(forCharacterIndex: location)
             let lineStart = gutter.lineStart(line)
@@ -147,23 +152,73 @@ struct CodeEditor: NSViewRepresentable {
             let start = gutter.lineStart(line)
             let text = textView.string as NSString
             guard start <= text.length else { return }
-            let range = text.lineRange(for: NSRange(location: start, length: 0))
-            textView.scrollRangeToVisible(range)
+            // Only the line start: a whole long line would scroll the view sideways (µVision keeps column 1 visible).
+            textView.scrollRangeToVisible(NSRange(location: start, length: 0))
+            if let clip = textView.enclosingScrollView?.contentView, clip.bounds.origin.x != 0 {
+                clip.scroll(to: NSPoint(x: 0, y: clip.bounds.origin.y))
+                textView.enclosingScrollView?.reflectScrolledClipView(clip)
+            }
             if select { textView.setSelectedRange(NSRange(location: start, length: 0)) }
             gutter.needsDisplay = true
         }
     }
 }
 
+/// Recent macOS lays the vertical ruler over the clip view instead of beside it, hiding the first
+/// columns of text under the gutter: put the clip view (and horizontal scroller) to the right of it.
+final class EditorScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        guard rulersVisible, let ruler = verticalRulerView else { return }
+        let width = ruler.ruleThickness
+        var clip = contentView.frame
+        if clip.minX < width {
+            clip.size.width -= width - clip.minX
+            clip.origin.x = width
+            contentView.frame = clip
+        }
+        if let scroller = horizontalScroller, scroller.frame.minX < width {
+            var frame = scroller.frame
+            frame.size.width -= width - frame.minX
+            frame.origin.x = width
+            scroller.frame = frame
+        }
+        var rulerFrame = ruler.frame
+        rulerFrame.origin.x = 0
+        rulerFrame.size.width = width
+        ruler.frame = rulerFrame
+    }
+}
+
 enum EditorStyle {
-    static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    /// µVision's default editor font (Courier New 10 pt at 96 dpi).
+    static let font = NSFont(name: "Courier New", size: 13) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     static var charWidth: CGFloat { ("0" as NSString).size(withAttributes: [.font: font]).width }
+
+    /// Edit ▸ Configuration ▸ Editor defaults: tab size 2 for C/C++ files, 4 for ASM and other files.
+    static func tabSize(for kind: SourceKind) -> Int {
+        switch kind {
+        case .c, .header: return 2
+        default: return 4
+        }
+    }
+
+    /// No explicit tab stops: every tab advances to the next multiple of the tab size, however many there
+    /// are (the default style has only 12 stops and wraps a line after the last one).
+    static func paragraph(for kind: SourceKind) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.tabStops = []
+        style.defaultTabInterval = charWidth * CGFloat(tabSize(for: kind))
+        style.lineBreakMode = .byClipping
+        return style
+    }
 }
 
 /// Left margin: breakpoints (red), executable lines (gray), PC (yellow arrow), line numbers.
 final class GutterView: NSRulerView {
     weak var textView: NSTextView?
     var breakpoints = Set<Int>()
+    var disabledBreakpoints = Set<Int>()
     var bookmarks = Set<Int>()
     var codeLines = Set<Int>()
     var executedLines = Set<Int>()
@@ -271,8 +326,19 @@ final class GutterView: NSRulerView {
                 NSBezierPath(roundedRect: NSRect(x: 20, y: y + 2, width: 8, height: h - 4), xRadius: 2, yRadius: 2).fill()
             }
             if breakpoints.contains(line) {
-                NSColor(calibratedRed: 0.85, green: 0.1, blue: 0.1, alpha: 1).setFill()
-                NSBezierPath(ovalIn: NSRect(x: 7, y: y + (h - 11) / 2, width: 11, height: 11)).fill()
+                let circle = NSBezierPath(ovalIn: NSRect(x: 7.5, y: y + (h - 11) / 2 + 0.5, width: 10, height: 10))
+                let red = NSColor(calibratedRed: 0.85, green: 0.1, blue: 0.1, alpha: 1)
+                if disabledBreakpoints.contains(line) {
+                    // Disabled: hollow circle, as in µVision.
+                    NSColor.white.setFill()
+                    circle.fill()
+                    red.setStroke()
+                    circle.lineWidth = 1.5
+                    circle.stroke()
+                } else {
+                    red.setFill()
+                    circle.fill()
+                }
             }
             if currentLine == line {
                 let arrow = NSBezierPath()
@@ -356,7 +422,8 @@ enum SyntaxHighlighter {
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
         storage.beginEditing()
-        storage.setAttributes([.font: EditorStyle.font, .foregroundColor: NSColor.black], range: full)
+        storage.setAttributes([.font: EditorStyle.font, .foregroundColor: NSColor.black,
+                               .paragraphStyle: EditorStyle.paragraph(for: kind)], range: full)
         let rules: [(NSRegularExpression, NSColor)]
         switch kind {
         case .c, .header: rules = cRules

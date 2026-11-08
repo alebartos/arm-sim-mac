@@ -98,6 +98,44 @@ struct ToolButton: View {
     }
 }
 
+/// Toolbar button with a drop-down arrow (µVision's Watch, Memory, Serial... buttons): clicking opens the menu.
+struct ToolMenuButton<Content: View>: View {
+    let icon: String
+    let help: String
+    var tint: Color = Color(white: 0.2)
+    var enabled = true
+    @ViewBuilder let content: () -> Content
+    @LocalState private var hovering = false
+
+    var body: some View {
+        Menu(content: content) {
+            Image(systemName: icon).font(.system(size: 13)).foregroundColor(tint)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .frame(height: 22)
+        .padding(.horizontal, 2)
+        .background(RoundedRectangle(cornerRadius: 3).fill(hovering ? Color.blue.opacity(0.10) : .clear))
+        .overlay(RoundedRectangle(cornerRadius: 3).stroke(hovering ? Color.blue.opacity(0.35) : .clear))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .help(help)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Scrolls both ways and starts at the top-left corner (a plain two-axis ScrollView centres content
+/// that is narrower than the view, which shows a tree from the middle).
+struct TwoAxisScrollView<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ScrollView([.vertical, .horizontal], content: content)
+            .defaultScrollAnchor(.topLeading)
+    }
+}
+
 struct ToolbarDivider: View {
     var body: some View {
         Rectangle().fill(UVColors.border).frame(width: 1, height: 18).padding(.horizontal, 3)

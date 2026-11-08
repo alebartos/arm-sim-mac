@@ -157,7 +157,7 @@ struct PackInstallerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.white)
             } else {
-                ScrollView([.vertical, .horizontal]) {
+                TwoAxisScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(tree) { node in nodeRows(node, level: 0) }
                     }

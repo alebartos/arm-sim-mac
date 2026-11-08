@@ -26,7 +26,7 @@ struct VariablesView: View {
             .background(UVColors.chrome)
             .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.border), alignment: .bottom)
 
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if let message = rows.message {
                         Text(message).font(.system(size: 10)).foregroundColor(.secondary).padding(4)

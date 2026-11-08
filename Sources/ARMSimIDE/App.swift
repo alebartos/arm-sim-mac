@@ -34,7 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         let args = CommandLine.arguments
-        if let i = args.firstIndex(of: "--smoke-import"), i + 1 < args.count {
+        if let i = args.firstIndex(of: "--shot"), i + 2 < args.count {
+            SmokeTest.screenshot(project: URL(fileURLWithPath: args[i + 1]), output: URL(fileURLWithPath: args[i + 2]),
+                                 debug: args.contains("--debug"))
+        } else if let i = args.firstIndex(of: "--smoke-import"), i + 1 < args.count {
             SmokeTest.importAndDebug(URL(fileURLWithPath: args[i + 1]))
         } else if let i = args.firstIndex(of: "--smoke"), i + 1 < args.count {
             SmokeTest.run(folder: URL(fileURLWithPath: args[i + 1]))
@@ -464,4 +467,36 @@ struct CodeCoverageMenuItem: View {
 struct PackInstallerMenuItem: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View { Button("Manage ▸ Pack Installer…") { openWindow(id: "packs") } }
+}
+
+extension SmokeTest {
+    /// `ARMSimIDE --shot <project.uvprojx> <out.png> [--debug]`: opens the project (and a debug session),
+    /// then saves an image of the whole main window, title bar and toolbar included, for UI comparison.
+    /// `ARMSIM_SHOT_SIZE=WxH` sets the window size (default 1920x1040, like µVision maximized on 1080p).
+    static func screenshot(project: URL, output: URL, debug: Bool) {
+        let ws = Workspace.shared
+        let size = (ProcessInfo.processInfo.environment["ARMSIM_SHOT_SIZE"] ?? "1920x1040").split(separator: "x").compactMap { Double($0) }
+        if let window = NSApp.windows.first(where: { $0.isVisible }), size.count == 2 {
+            window.setFrame(NSRect(x: 0, y: 0, width: size[0], height: size[1]), display: true)
+        }
+        ws.open(projectURL: project)
+        // ARMSIM_SHOT_OPEN=relative/file.c[,other.s]: editor tabs to open (µVision reopens them from .uvguix).
+        for file in (ProcessInfo.processInfo.environment["ARMSIM_SHOT_OPEN"] ?? "").split(separator: ",") {
+            if let dir = ws.projectDirectory { ws.openDocument(dir.appendingPathComponent(String(file))) }
+        }
+        if debug { ws.toggleDebugSession() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2)) {
+            if let tv = EditorCommands.lastEditor, let sv = tv.enclosingScrollView {
+                FileHandle.standardError.write(Data("[shot] clip \(sv.contentView.frame) bounds \(sv.contentView.bounds) tv \(tv.frame) inset \(tv.textContainerInset) origin \(tv.textContainerOrigin) ruler \(sv.verticalRulerView?.frame ?? .zero)\n".utf8))
+            }
+            if let window = NSApp.windows.first(where: { $0.isVisible }),
+               let frameView = window.contentView?.superview,
+               let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) {
+                frameView.cacheDisplay(in: frameView.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: output)
+                FileHandle.standardError.write(Data("[shot] \(output.path)\n".utf8))
+            }
+            NSApp.terminate(nil)
+        }
+    }
 }

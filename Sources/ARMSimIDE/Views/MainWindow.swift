@@ -62,6 +62,8 @@ struct MainWindow: View {
 
     private var title: String {
         guard let project = workspace.project else { return "ARM Sim" }
+        // µVision: "<full path of the project file> - µVision".
+        if let url = workspace.projectURL { return "\(url.path) - ARM Sim" }
         let path = workspace.projectDirectory?.path ?? ""
         return "\(path)/\(project.name).\(ProjectFile.fileExtension) - ARM Sim"
     }
@@ -76,15 +78,15 @@ struct MainWindow: View {
     private var leftPane: some View {
         VStack(spacing: 0) {
             if workspace.mode == .debug {
-                PaneHeader(title: ["Registers", "Project", "Symbols"][min(layout.leftTab, 2)]) { layout.showRegisters = false }
+                PaneHeader(title: ["Project", "Registers", "Symbols"][min(layout.leftTab, 2)]) { layout.showRegisters = false }
                 Group {
                     switch layout.leftTab {
-                    case 1: ProjectPanel(workspace: workspace)
+                    case 0: ProjectPanel(workspace: workspace)
                     case 2: SymbolsPanel(workspace: workspace)
                     default: RegistersPanel(debugger: workspace.debugger)
                     }
                 }
-                BottomTabBar(tabs: [("cpu", "Registers"), ("folder", "Project"), ("textformat.abc", "Symbols")], selection: $layout.leftTab)
+                BottomTabBar(tabs: [("folder", "Project"), ("list.dash", "Registers"), ("textformat.abc", "Symbols")], selection: $layout.leftTab)
             } else {
                 PaneHeader(title: ["Project", "Books", "Functions", "Templates"][min(layout.leftTab, 3)]) { layout.showProject = false }
                 Group {
@@ -220,7 +222,9 @@ struct EditorArea: View {
                 let pcLine = workspace.mode == .debug && !debugger.isRunning && debugger.currentLocation?.path == document.path
                     ? debugger.currentLocation?.line : nil
                 let reveal = workspace.revealRequest?.path == document.path ? workspace.revealRequest?.line : nil
-                CodeEditor(document: document, breakpoints: breakpoints, bookmarks: bookmarks.lines(in: document.path),
+                CodeEditor(document: document, breakpoints: breakpoints,
+                           disabledBreakpoints: Set(workspace.disabledBreakpoints.filter { $0.path == document.path }.map(\.line)),
+                           bookmarks: bookmarks.lines(in: document.path),
                            codeLines: codeLines, executedLines: executedLines,
                            currentLine: pcLine,
                            revealLine: reveal, revealToken: revealToken,

@@ -141,7 +141,7 @@ struct FindInFilesResults: View {
             .padding(.horizontal, 6)
             .frame(height: 22)
             .background(UVColors.chrome)
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(finder.results) { result in
                         Text("\(displayPath(result.path))(\(result.line)): \(result.lineText)")

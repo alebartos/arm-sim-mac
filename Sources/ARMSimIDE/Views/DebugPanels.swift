@@ -21,7 +21,7 @@ struct DisassemblyPanel: View {
         let pc = debugger.snapshot.r[15]
         let breakpoints = workspace.resolvedBreakpointAddresses()
         ScrollViewReader { proxy in
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(rows) { row in
                         rowView(row, pc: pc, breakpoints: breakpoints)
@@ -130,7 +130,7 @@ struct BuildOutputPanel: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(workspace.buildLog) { line in
                         Text(line.text)
@@ -168,7 +168,7 @@ struct CommandPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                ScrollView([.vertical, .horizontal]) {
+                TwoAxisScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(debugger.commandLog.enumerated()), id: \.offset) { index, line in
                             Text(line).font(UVColors.mono)
@@ -334,7 +334,7 @@ struct MemoryPanel: View {
             .padding(.horizontal, 4)
             .frame(height: 22)
             .background(UVColors.chrome)
-            ScrollView([.vertical, .horizontal]) {
+            TwoAxisScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if bytes.isEmpty {
                         Text(debugger.isActive ? "" : "Start a debug session to view memory.")

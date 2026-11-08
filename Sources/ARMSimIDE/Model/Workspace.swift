@@ -48,6 +48,11 @@ final class Workspace: ObservableObject {
     @Published var isBuilding = false
     @Published var breakpoints = Set<SourceBreakpoint>()
     @Published var addressBreakpoints = Set<UInt32>()
+    /// Breakpoints kept but not armed (Debug ▸ Enable/Disable Breakpoint, hollow circle in the margin).
+    @Published var disabledBreakpoints = Set<SourceBreakpoint>()
+    /// Edit ▸ Navigate Backwards / Forwards: positions left by jumps (reveal, Go to Definition, ...).
+    @Published private(set) var navigationBack: [SourceLocation] = []
+    @Published private(set) var navigationForward: [SourceLocation] = []
     @Published var showOptions = false
     @Published var showDeviceSelection = false
     /// Set by "New Project…": the device dialog is shown next, then the project is created.
@@ -184,18 +189,19 @@ final class Workspace: ObservableObject {
         uvDocument = xml
         uvSavedData = xml.xmlData(options: [.nodePreserveAll])
         uvTargets = ((try? xml.nodes(forXPath: "/Project/Targets/Target/TargetName")) ?? []).compactMap(\.stringValue)
-        let saved = UserDefaults.standard.integer(forKey: "uvTarget:" + url.path)
+        // Our own last choice, else the target µVision marks current in the .uvoptx (<IsCurrentTarget>).
+        let saved = UserDefaults.standard.object(forKey: "uvTarget:" + url.path) as? Int ?? Self.uvCurrentTarget(projectURL: url) ?? 0
         loadUVTarget(saved < uvTargets.count ? saved : 0, url: url)
         didOpen(url)
         loadUVOptions()
-        let armasm = (project?.groups.flatMap(\.files) ?? []).filter { file in
-            guard let dir = projectDirectory, SourceKind(url: URL(fileURLWithPath: file)) == .asm,
-                  let text = try? String(contentsOf: dir.appendingPathComponent(file), encoding: .utf8) else { return false }
-            return BuildSystem.looksLikeArmasm(text)
-        }
-        for file in armasm {
-            buildLog.append(LogLine(text: "\(file): Keil armasm syntax, translated automatically when building."))
-        }
+    }
+
+    /// Index of the target whose `<TargetOption><OPTFL><IsCurrentTarget>` is 1 in the project's .uvoptx.
+    static func uvCurrentTarget(projectURL url: URL) -> Int? {
+        let options = url.deletingPathExtension().appendingPathExtension("uvoptx")
+        guard let xml = try? XMLDocument(contentsOf: options, options: []),
+              let flags = try? xml.nodes(forXPath: "/ProjectOpt/Target/TargetOption/OPTFL/IsCurrentTarget") else { return nil }
+        return flags.firstIndex { $0.stringValue?.trimmingCharacters(in: .whitespaces) == "1" }
     }
 
     /// Switch the active target (toolbar "Target" popup).
@@ -439,8 +445,45 @@ final class Workspace: ObservableObject {
     }
 
     func reveal(_ location: SourceLocation) {
+        if let here = currentEditorLocation, here != location {
+            navigationBack.append(here)
+            if navigationBack.count > 50 { navigationBack.removeFirst() }
+            navigationForward = []
+        }
+        jump(to: location)
+    }
+
+    private var currentEditorLocation: SourceLocation? {
+        activeDocument.map { SourceLocation(path: $0.path, line: cursorLine) }
+    }
+
+    private func jump(to location: SourceLocation) {
         openDocument(URL(fileURLWithPath: location.path))
         revealRequest = location
+    }
+
+    func toggleBookmarkAtCursor() {
+        if let d = activeDocument { Bookmarks.shared.toggle(path: d.path, line: cursorLine) }
+    }
+
+    func nextBookmark() {
+        if let d = activeDocument, let b = Bookmarks.shared.next(after: SourceLocation(path: d.path, line: cursorLine)) { reveal(b) }
+    }
+
+    func previousBookmark() {
+        if let d = activeDocument, let b = Bookmarks.shared.previous(before: SourceLocation(path: d.path, line: cursorLine)) { reveal(b) }
+    }
+
+    func navigateBackward() {
+        guard let target = navigationBack.popLast() else { return }
+        if let here = currentEditorLocation { navigationForward.append(here) }
+        jump(to: target)
+    }
+
+    func navigateForward() {
+        guard let target = navigationForward.popLast() else { return }
+        if let here = currentEditorLocation { navigationBack.append(here) }
+        jump(to: target)
     }
 
     // MARK: Build
@@ -480,6 +523,7 @@ final class Workspace: ObservableObject {
         if mode == .debug {
             debugger.stopSession()
             mode = .edit
+            WindowLayout.shared.leftTab = 0
             return
         }
         guard let project, let dir = projectDirectory, !isBuilding else { return }
@@ -497,6 +541,7 @@ final class Workspace: ObservableObject {
                     return
                 }
                 self.mode = .debug
+                WindowLayout.shared.leftTab = 1
                 self.startDebugger(product)
                 SystemViewerState.shared.load(svdURL: self.svdURL())
             }
@@ -544,6 +589,7 @@ final class Workspace: ObservableObject {
                     return
                 }
                 self.mode = .debug
+                WindowLayout.shared.leftTab = 1
                 self.startDebugger(product)
                 SystemViewerState.shared.load(svdURL: self.svdURL())
             }
@@ -762,7 +808,12 @@ final class Workspace: ObservableObject {
 
     func toggleBreakpoint(path: String, line: Int) {
         let bp = SourceBreakpoint(path: path, line: line)
-        if breakpoints.contains(bp) { breakpoints.remove(bp) } else { breakpoints.insert(bp) }
+        if breakpoints.contains(bp) {
+            breakpoints.remove(bp)
+            disabledBreakpoints.remove(bp)
+        } else {
+            breakpoints.insert(bp)
+        }
         syncBreakpoints()
     }
 
@@ -786,7 +837,23 @@ final class Workspace: ObservableObject {
         syncBreakpoints()
     }
 
+    /// Debug ▸ Enable/Disable Breakpoint (Ctrl+F9) on the cursor line.
+    func toggleBreakpointEnabledAtCursor() {
+        guard let document = activeDocument else { return }
+        let bp = SourceBreakpoint(path: document.path, line: cursorLine)
+        guard breakpoints.contains(bp) else { NSSound.beep(); return }
+        if disabledBreakpoints.contains(bp) { disabledBreakpoints.remove(bp) } else { disabledBreakpoints.insert(bp) }
+        syncBreakpoints()
+    }
+
+    /// Debug ▸ Disable All Breakpoints in current Target.
+    func disableAllBreakpoints() {
+        disabledBreakpoints = breakpoints
+        syncBreakpoints()
+    }
+
     func removeAllBreakpoints() {
+        disabledBreakpoints = []
         breakpoints = []
         addressBreakpoints = []
         syncBreakpoints()
@@ -795,7 +862,7 @@ final class Workspace: ObservableObject {
     func resolvedBreakpointAddresses() -> Set<UInt32> {
         var result = addressBreakpoints
         guard let info = lastProduct?.debugInfo else { return result }
-        for bp in breakpoints {
+        for bp in breakpoints where !disabledBreakpoints.contains(bp) {
             if let a = info.firstAddress(for: SourceLocation(path: bp.path, line: bp.line)) { result.insert(a) }
         }
         return result
