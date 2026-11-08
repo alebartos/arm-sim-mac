@@ -6,6 +6,10 @@ enum UVColors {
     static let paneTitle = LinearGradient(colors: [Color(red: 0.86, green: 0.89, blue: 0.95), Color(red: 0.78, green: 0.83, blue: 0.92)],
                                           startPoint: .top, endPoint: .bottom)
     static let border = Color(nsColor: NSColor(calibratedWhite: 0.72, alpha: 1))
+    /// Cell lines of the Watch / Locals grids.
+    static let grid = Color(nsColor: NSColor(calibratedWhite: 0.86, alpha: 1))
+    /// Memory window bytes (µVision draws them dark yellow).
+    static let memoryValue = Color(red: 0.55, green: 0.5, blue: 0.0)
     static let changed = Color(red: 0.2, green: 0.45, blue: 0.85)
     /// µVision uses Courier New in the Disassembly, Command and Build Output windows.
     static let mono = NSFont(name: "Courier New", size: 13) != nil ? Font.custom("Courier New", size: 13) : Font.system(size: 11, design: .monospaced)

@@ -64,11 +64,21 @@ final class DwarfType {
         }
     }
 
+    /// Short base type names used by µVision's Watch and Locals windows.
+    static let uvBaseNames = ["unsigned char": "uchar", "unsigned short": "ushort", "short unsigned int": "ushort",
+                              "unsigned int": "uint", "unsigned long": "ulong", "long unsigned int": "ulong",
+                              "signed char": "schar", "short int": "short", "long int": "long",
+                              "long long int": "long long", "long long unsigned int": "ulong long",
+                              "unsigned long long": "ulong long"]
+
     /// C spelling of the type, e.g. "struct Point *", "int[4]", "volatile u32".
     var displayName: String {
         switch kind {
-        case .base, .typedef: return name
+        case .base: return Self.uvBaseNames[name] ?? name
+        case .typedef: return name
         case .void: return "void"
+        // µVision does not show volatile ("volatile int" is listed as "int").
+        case .qualifier where name == "volatile": return target?.displayName ?? "void"
         case .qualifier: return "\(name) \(target?.displayName ?? "void")"
         case .pointer: return "\(target?.displayName ?? "void") *"
         case .array: return "\(target?.displayName ?? "?")" + counts.map { "[\($0)]" }.joined()
@@ -149,6 +159,13 @@ struct DwarfFunction {
 }
 
 /// One row of a variable tree (Watch / Locals).
+/// Functions and globals defined by one object file.
+struct DwarfModule {
+    let name: String
+    let functions: [DwarfFunction]
+    let globals: [DwarfVariable]
+}
+
 struct ValueNode: Identifiable {
     let id: String
     let name: String
@@ -161,6 +178,8 @@ struct ValueNode: Identifiable {
 final class DwarfInfo {
     private(set) var functions: [DwarfFunction] = []
     private(set) var globalVariables: [DwarfVariable] = []
+    /// Functions and globals of each object file, in link order (µVision Symbols window).
+    private(set) var modules: [DwarfModule] = []
     private var tables: [TypeTable] = []
     private var symbolNames: [UInt32: String] = [:]
 
@@ -187,8 +206,15 @@ final class DwarfInfo {
             if info.symbolNames[symbol.address] == nil || symbol.isGlobal { info.symbolNames[symbol.address] = symbol.name }
         }
         for object in objects {
-            guard let text = Self.dwarfdump(object) else { continue }
+            let name = object.deletingPathExtension().lastPathComponent
+            guard let text = Self.dwarfdump(object) else {
+                info.modules.append(DwarfModule(name: name, functions: [], globals: []))
+                continue
+            }
+            let (f0, g0) = (info.functions.count, info.globalVariables.count)
             info.ingest(text, image: image)
+            info.modules.append(DwarfModule(name: name, functions: Array(info.functions[f0...]).sorted { $0.low < $1.low },
+                                            globals: Array(info.globalVariables[g0...])))
         }
         info.functions.sort { $0.low < $1.low }
         return info
@@ -687,6 +713,8 @@ final class DwarfInfo {
             }
             return "\(s)"
         }
+        // µVision shows integers in hex by default (Watch/Locals context menu ▸ Hexadecimal Display).
+        let hex = ValueDisplay.hexadecimal
         switch t.encoding {
         case "float":
             if bits == 32 { return String(format: "%g", Float(bitPattern: UInt32(truncatingIfNeeded: value))) }
@@ -697,11 +725,11 @@ final class DwarfInfo {
         case "signed_char", "unsigned_char":
             let c = UInt8(truncatingIfNeeded: value)
             let printable = c >= 32 && c < 127 ? " '\(Character(UnicodeScalar(c)))'" : ""
-            return "\(t.encoding == "signed_char" ? signedValue() : Int64(value)) (\(hexText))\(printable)"
+            return (hex ? hexText : "\(t.encoding == "signed_char" ? signedValue() : Int64(value))") + printable
         case "signed":
-            return "\(signedValue()) (\(hexText))"
+            return hex ? hexText : "\(signedValue())"
         default:
-            return "\(value) (\(hexText))"
+            return hex ? hexText : "\(value)"
         }
     }
 
@@ -724,5 +752,13 @@ final class DwarfInfo {
 private extension String {
     func leftPadded(to length: Int) -> String {
         count >= length ? self : String(repeating: "0", count: length - count) + self
+    }
+}
+
+/// Number base of the Watch and Call Stack + Locals windows (µVision: Hexadecimal Display, on by default).
+enum ValueDisplay {
+    static var hexadecimal: Bool {
+        get { UserDefaults.standard.object(forKey: "hexadecimalDisplay") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "hexadecimalDisplay") }
     }
 }

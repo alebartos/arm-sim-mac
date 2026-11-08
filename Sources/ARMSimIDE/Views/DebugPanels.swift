@@ -234,106 +234,63 @@ struct CallStackPanel: View {
     private func exceptionName(_ n: Int) -> String { ExceptionNumber.name(n) }
 }
 
+/// Watch 1: the typed variable grid on the watch expressions (µVision Name | Value | Type).
 struct WatchPanel: View {
     @ObservedObject var debugger: DebugController
-    @LocalState private var newExpression = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            tableHeader(["Name", "Value", "Type"])
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(debugger.watchExpressions.enumerated()), id: \.offset) { index, expression in
-                        let typed = debugger.isActive && !debugger.isRunning
-                            ? debugger.product?.dwarf?.evaluate(expression, pc: debugger.snapshot.r[15], registers: debugger.snapshot.r,
-                                                                 read: { debugger.readMemory($0, count: $1) }) : nil
-                        let result = typed.map { (value: UInt32(0), text: $0.valueText) }
-                            ?? (debugger.isActive ? debugger.evaluate(expression) : nil)
-                        HStack(spacing: 0) {
-                            Image(systemName: "eyeglasses").font(.system(size: 9)).foregroundColor(.blue).frame(width: 14)
-                            Text(expression).frame(width: 170, alignment: .leading)
-                            Text(result?.text ?? (debugger.isRunning ? "<running>" : "<cannot evaluate>"))
-                                .font(UVColors.mono).frame(width: 200, alignment: .leading)
-                            Text(typed?.typeName ?? symbolType(expression)).foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .font(UVColors.small).frame(height: 17)
-                        .contextMenu {
-                            Button("Remove '\(expression)'") { debugger.watchExpressions.remove(at: index) }
-                        }
-                    }
-                    HStack(spacing: 0) {
-                        Spacer().frame(width: 14)
-                        TextField("<Enter expression>", text: $newExpression, onCommit: {
-                            let e = newExpression.trimmingCharacters(in: .whitespaces)
-                            if !e.isEmpty { debugger.watchExpressions.append(e) }
-                            newExpression = ""
-                        })
-                        .textFieldStyle(.plain).font(UVColors.small).frame(width: 200)
-                        Spacer()
-                    }
-                    .frame(height: 18)
-                }
-            }
-        }
-        .background(Color.white)
-    }
-
-    private func symbolType(_ expression: String) -> String {
-        guard let symbol = debugger.product?.image.symbol(named: expression) else {
-            return expression.hasPrefix("*") ? "uint32_t" : "register / number"
-        }
-        if symbol.isFunction { return "function" }
-        switch symbol.size {
-        case 1: return "uint8_t"
-        case 2: return "uint16_t"
-        case 4: return "uint32_t"
-        default: return "object [\(symbol.size) bytes] (first word)"
-        }
+        VariablesView(debugger: debugger, info: { debugger.product?.dwarf }, expressions: debugger.watchExpressions)
     }
 }
 
+/// Memory 1, as µVision: rows start at the typed address and hold as many bytes as fit in the width.
 struct MemoryPanel: View {
     @ObservedObject var debugger: DebugController
     @AppStorage("memoryAddress") private var addressText = "0x20000000"
     @LocalState private var editingCell: UInt32?
     @LocalState private var editText = ""
 
+    /// Width of one "XX " byte cell and of the "0x00000000: " address column in the Courier New font.
+    private static let cellWidth: CGFloat = 23.5
+    private static let addressWidth: CGFloat = 94
+
     var body: some View {
-        let base = (debugger.parseAddress(addressText) ?? 0) & ~0xF
-        let rows = 64
-        let bytes = debugger.isActive ? debugger.readMemory(base, count: rows * 16) : []
+        let base = debugger.parseAddress(addressText) ?? 0
         let _ = debugger.revision
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 Text("Address:").font(UVColors.small)
-                TextField("", text: $addressText).font(UVColors.mono).textFieldStyle(.roundedBorder).frame(width: 160)
+                TextField("", text: $addressText).font(UVColors.small).textFieldStyle(.squareBorder)
                     .controlSize(.small)
-                Spacer()
             }
-            .padding(.horizontal, 4)
-            .frame(height: 22)
+            .padding(.horizontal, 8)
+            .frame(height: 26)
             .background(UVColors.chrome)
-            TwoAxisScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if bytes.isEmpty {
-                        Text(debugger.isActive ? "" : "Start a debug session to view memory.")
-                            .font(UVColors.small).foregroundColor(.secondary).padding(4)
-                    } else {
-                        ForEach(0..<rows, id: \.self) { row in
-                            let rowBase = base &+ UInt32(row * 16)
-                            HStack(spacing: 0) {
-                                Text(String(format: "0x%08X: ", rowBase)).font(UVColors.mono).foregroundColor(Color(white: 0.3))
-                                ForEach(0..<16, id: \.self) { col in
-                                    cell(rowBase &+ UInt32(col), bytes[row * 16 + col])
+            GeometryReader { geometry in
+                let perRow = max(1, Int((geometry.size.width - Self.addressWidth - 24) / Self.cellWidth))
+                let rows = 64
+                let bytes = debugger.isActive ? debugger.readMemory(base, count: rows * perRow) : []
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if bytes.isEmpty {
+                            Text(debugger.isActive ? "" : "Start a debug session to view memory.")
+                                .font(UVColors.small).foregroundColor(.secondary).padding(4)
+                        } else {
+                            ForEach(0..<rows, id: \.self) { row in
+                                let rowBase = base &+ UInt32(row * perRow)
+                                HStack(spacing: 0) {
+                                    Text(String(format: "0x%08X: ", rowBase)).font(UVColors.mono).frame(width: Self.addressWidth, alignment: .leading)
+                                    ForEach(0..<perRow, id: \.self) { col in
+                                        cell(rowBase &+ UInt32(col), bytes[row * perRow + col]).frame(width: Self.cellWidth, alignment: .leading)
+                                    }
                                 }
-                                Text("  " + ascii(bytes[(row * 16)..<(row * 16 + 16)])).font(UVColors.mono).foregroundColor(.gray)
+                                .frame(height: 15)
                             }
-                            .frame(height: 15)
                         }
                     }
+                    .padding(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(4)
             }
             .background(Color.white)
         }
@@ -346,23 +303,16 @@ struct MemoryPanel: View {
                 if let v = UInt8(editText, radix: 16) { debugger.writeMemory(address, size: 1, value: UInt32(v)) }
                 editingCell = nil
             })
-            .font(UVColors.mono).textFieldStyle(.plain).frame(width: 21)
+            .font(UVColors.mono).textFieldStyle(.plain)
         } else {
-            Text(value.map { String(format: "%02X ", $0) } ?? "?? ").font(UVColors.mono)
-                .foregroundColor(value == nil ? .gray : .black)
+            Text(value.map { String(format: "%02X", $0) } ?? "??").font(UVColors.mono)
+                .foregroundColor(value == nil ? .gray : UVColors.memoryValue)
                 .onTapGesture(count: 2) {
-                    guard value != nil, !debugger.isRunning else { return }
-                    editText = String(format: "%02X", value!)
+                    guard let value, !debugger.isRunning else { return }
+                    editText = String(format: "%02X", value)
                     editingCell = address
                 }
         }
-    }
-
-    private func ascii(_ slice: ArraySlice<UInt8?>) -> String {
-        String(slice.map { b -> Character in
-            guard let b, b >= 32, b < 127 else { return "." }
-            return Character(UnicodeScalar(b))
-        })
     }
 }
 
@@ -403,43 +353,36 @@ func tableHeader(_ titles: [String]) -> some View {
 
 // MARK: - Serial window (UART #1-#4)
 
+/// UART #1: the output of UART0 as a plain console, as µVision's serial window. Keys typed in the window go
+/// to the UART receiver.
 struct UARTPanel: View {
     @ObservedObject var debugger: DebugController
-    @LocalState private var port = 0
-    @LocalState private var input = ""
+    var port = 0
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Picker("", selection: $port) {
-                    ForEach(0..<4, id: \.self) { Text("UART #\($0 + 1)").tag($0) }
-                }
-                .labelsHidden().frame(width: 110).controlSize(.small)
-                Spacer()
-                Button("Clear") { debugger.uartOutput[port] = "" }.controlSize(.small)
+        ScrollViewReader { proxy in
+            ScrollView([.vertical, .horizontal]) {
+                Text(debugger.uartOutput[port].isEmpty ? " " : debugger.uartOutput[port])
+                    .font(UVColors.mono).frame(maxWidth: .infinity, alignment: .topLeading).padding(4)
+                    .textSelection(.enabled)
+                Color.clear.frame(height: 1).id("end")
             }
-            .padding(.horizontal, 4).frame(height: 22).background(UVColors.chrome)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(debugger.uartOutput[port].isEmpty ? " " : debugger.uartOutput[port])
-                        .font(UVColors.mono).frame(maxWidth: .infinity, alignment: .topLeading).padding(4)
-                        .textSelection(.enabled)
-                    Color.clear.frame(height: 1).id("end")
-                }
-                .background(Color.white)
-                .onChange(of: debugger.uartOutput[port]) { _ in proxy.scrollTo("end", anchor: .bottom) }
-            }
-            HStack(spacing: 2) {
-                Text("Send:").font(UVColors.small)
-                TextField("type and press Enter (sent to the UART receiver)", text: $input, onCommit: {
-                    debugger.sendUART(port, input + "\r")
-                    input = ""
-                })
-                .textFieldStyle(.plain).font(UVColors.mono)
-            }
-            .padding(.horizontal, 4).frame(height: 20).background(Color.white)
-            .disabled(debugger.lpc == nil)
+            .background(Color.white)
+            .onChange(of: debugger.uartOutput[port]) { _ in proxy.scrollTo("end", anchor: .bottom) }
         }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onTapGesture { focused = true }
+        .onKeyPress { press in
+            guard debugger.lpc != nil, debugger.isActive else { return .ignored }
+            let text = press.key == .return ? "\r" : press.characters
+            guard !text.isEmpty else { return .ignored }
+            debugger.sendUART(port, text)
+            return .handled
+        }
+        .contextMenu { Button("Clear Window") { debugger.uartOutput[port] = "" } }
     }
 }
 
@@ -501,22 +444,22 @@ struct CodeCoverageWindow: View {
 struct ToolboxWindow: View {
     @ObservedObject var debugger = Workspace.shared.debugger
 
+    /// µVision's built-in "Update Windows" button, then the buttons added with DEFINE BUTTON.
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if debugger.toolboxButtons.isEmpty {
-                Text(debugger.isActive ? "No buttons. A debug script adds them with\nDEFINE BUTTON \"label\", \"command\"."
-                                       : "Start a debug session to use the toolbox.")
-                    .font(.system(size: 11)).foregroundColor(.secondary)
-            }
+        VStack(spacing: 4) {
+            Button { debugger.updateWindows() } label: { Text("Update Windows").frame(maxWidth: .infinity) }
+                .disabled(!debugger.isActive)
             ForEach(debugger.toolboxButtons) { button in
-                Button(button.label) { debugger.execute(command: button.command, workspace: Workspace.shared) }
-                    .frame(maxWidth: .infinity)
-                    .help(button.command)
-                    .disabled(!debugger.isActive)
+                Button { debugger.execute(command: button.command, workspace: Workspace.shared) } label: {
+                    Text(button.label).frame(maxWidth: .infinity)
+                }
+                .help(button.command)
+                .disabled(!debugger.isActive)
             }
-            Spacer(minLength: 0)
         }
-        .padding(10)
-        .frame(minWidth: 180, minHeight: 120)
+        .font(.system(size: 11))
+        .padding(8)
+        .frame(width: 170)
+        .fixedSize()
     }
 }

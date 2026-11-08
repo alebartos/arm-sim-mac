@@ -249,49 +249,151 @@ struct LandTigerWindow: View {
 }
 
 /// Debug ▸ Symbols window content.
+/// Symbols window, as µVision: Virtual Registers, then the application with one node per module
+/// (object file) holding its functions and variables. The mask filters names (`*` and `?` wildcards).
 struct SymbolsPanel: View {
     @ObservedObject var workspace: Workspace
-    @LocalState private var filter = ""
+    @LocalState private var mask = ""
+    @LocalState private var expanded: Set<String> = ["app"]
+
+    private struct Node: Identifiable {
+        let id: String
+        let name: String
+        var location = ""
+        var type = ""
+        var address: UInt32?
+        var children: [Node] = []
+    }
+
+    private static let columns: (name: CGFloat, location: CGFloat, type: CGFloat) = (110, 80, 110)
+
+    private func matches(_ name: String) -> Bool {
+        let m = mask.trimmingCharacters(in: .whitespaces)
+        guard !m.isEmpty, m != "*" else { return true }
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: m)
+            .replacingOccurrences(of: "\\*", with: ".*").replacingOccurrences(of: "\\?", with: ".") + "$"
+        return name.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private func roots() -> [Node] {
+        var vtregs: [Node] = []
+        if workspace.debugger.lpc != nil {
+            vtregs += (0..<5).map { Node(id: "vt:PORT\($0)", name: "PORT\($0)", type: "uint") }
+            vtregs += (0..<8).map { Node(id: "vt:AIN\($0)", name: "AIN\($0)", type: "float") }
+            vtregs.append(Node(id: "vt:AOUT", name: "AOUT", type: "float"))
+            vtregs += (0..<4).map { Node(id: "vt:S\($0)IN", name: "S\($0)IN", type: "ushort") }
+        }
+        vtregs.append(Node(id: "vt:CLOCK", name: "CLOCK", type: "ulong"))
+        vtregs = vtregs.filter { matches($0.name) }
+        let modules = (workspace.lastProduct?.dwarf?.modules ?? []).map { module -> Node in
+            var children = module.functions.map {
+                Node(id: "f:\(module.name):\($0.name)", name: $0.name, location: String(format: "0x%08X", $0.low),
+                     type: $0.signature, address: $0.low)
+            }
+            children += module.globals.map { v -> Node in
+                var address: UInt32?
+                if case .address(let a) = v.location { address = a }
+                return Node(id: "v:\(module.name):\(v.name)", name: v.name, location: address.map { String(format: "0x%08X", $0) } ?? "",
+                            type: v.type?.displayName ?? "", address: address)
+            }
+            return Node(id: "m:\(module.name)", name: module.name, type: "Module", children: children.filter { matches($0.name) })
+        }
+        let app = workspace.lastProduct.map { $0.axfURL.deletingPathExtension().lastPathComponent } ?? "Application"
+        return [Node(id: "vt", name: "Virtual Registers", children: vtregs),
+                Node(id: "app", name: app, type: "Application", children: modules)]
+    }
 
     var body: some View {
-        let symbols = (workspace.lastProduct?.image.symbols ?? [])
-            .filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
-            .sorted { $0.address < $1.address }
+        let _ = workspace.debugger.revision
+        let nodes = roots()
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField("Mask: *", text: $filter).textFieldStyle(.plain)
-            }
-            .font(UVColors.small).padding(4).background(UVColors.chrome)
             HStack(spacing: 0) {
-                Text("Name").frame(width: 150, alignment: .leading)
-                Text("Location").frame(width: 90, alignment: .leading)
-                Text("Type")
                 Spacer()
+                TextField("", text: $mask, prompt: Text("*")).textFieldStyle(.squareBorder).controlSize(.small).frame(width: 120)
             }
-            .font(.system(size: 11, weight: .semibold)).padding(.horizontal, 4).frame(height: 18).background(UVColors.chrome)
-            List(symbols, id: \.name) { symbol in
-                HStack(spacing: 0) {
-                    Text(symbol.name).frame(width: 150, alignment: .leading).lineLimit(1)
-                    Text(String(format: "0x%08X", symbol.address)).font(UVColors.mono).frame(width: 90, alignment: .leading)
-                    Text(symbol.isFunction ? "code" : symbol.size > 0 ? "data [\(symbol.size)]" : "label")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .font(UVColors.small)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    if let location = workspace.lastProduct?.debugInfo.lineByAddress[symbol.address] {
-                        workspace.reveal(location)
-                    }
-                }
-                .contextMenu {
-                    Button("Add '\(symbol.name)' to Watch 1") { workspace.debugger.watchExpressions.append(symbol.name) }
-                    Button("Set Breakpoint") { workspace.addAddressBreakpoint(symbol.address) }
-                }
+            .font(UVColors.small).padding(4).background(Color.white)
+            HStack(spacing: 0) {
+                Text("Module / Name").padding(.leading, 4).frame(width: Self.columns.name - 1, alignment: .leading)
+                Divider()
+                Text("Location").padding(.leading, 4).frame(width: Self.columns.location - 1, alignment: .leading)
+                Divider()
+                Text("Type").padding(.leading, 4).frame(width: Self.columns.type - 1, alignment: .leading)
+                Divider()
             }
-            .listStyle(.plain)
+            .lineLimit(1)
+            .font(.system(size: 11)).fixedSize().frame(minWidth: 0, maxWidth: .infinity, minHeight: 18, maxHeight: 18, alignment: .leading).clipped()
+            .background(UVColors.chrome)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.border), alignment: .bottom)
+            TwoAxisScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(nodes) { tree($0, level: 0) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color.white)
         }
+    }
+
+    private func isOpen(_ node: Node) -> Bool {
+        expanded.contains(node.id) || (!mask.isEmpty && mask != "*" && !node.children.isEmpty)
+    }
+
+    private func cell(_ text: String, _ width: CGFloat) -> some View {
+        Text(text).lineLimit(1).padding(.leading, 3).frame(width: width, height: 20, alignment: .leading)
+            .overlay(Rectangle().frame(width: 1).foregroundColor(UVColors.grid), alignment: .trailing)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.grid), alignment: .bottom)
+    }
+
+    private func tree(_ node: Node, level: Int) -> AnyView {
+        let open = isOpen(node)
+        return AnyView(VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                HStack(spacing: 3) {
+                    Spacer().frame(width: CGFloat(level) * 14)
+                    if node.children.isEmpty && level > 0 && !node.id.hasPrefix("m:") {
+                        Image(systemName: node.id.hasPrefix("f:") ? "function" : "diamond.fill")
+                            .font(.system(size: node.id.hasPrefix("f:") ? 9 : 7))
+                            .foregroundColor(node.id.hasPrefix("f:") ? Color(red: 0.8, green: 0.2, blue: 0.6) : Color(red: 0.15, green: 0.4, blue: 0.85))
+                            .frame(width: 11)
+                    } else {
+                        Button {
+                            if expanded.contains(node.id) { expanded.remove(node.id) } else { expanded.insert(node.id) }
+                        } label: {
+                            Image(systemName: open ? "minus.square" : "plus.square").font(.system(size: 9)).foregroundColor(.gray)
+                        }
+                        .buttonStyle(.plain).frame(width: 11)
+                        if node.id.hasPrefix("m:") {
+                            Image(systemName: "cube").font(.system(size: 10)).foregroundColor(Color(red: 0.75, green: 0.55, blue: 0.1))
+                        }
+                    }
+                    Text(node.name).lineLimit(1)
+                }
+                .padding(.leading, 3)
+                .frame(width: Self.columns.name, height: 20, alignment: .leading)
+                .clipped()
+                cell(node.location, Self.columns.location)
+                cell(node.type, Self.columns.type)
+                Spacer(minLength: 0)
+            }
+            .font(UVColors.small)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                if let address = node.address, let location = workspace.lastProduct?.debugInfo.lineByAddress[address] {
+                    workspace.reveal(location)
+                }
+            }
+            .contextMenu {
+                if node.id.hasPrefix("v:") || node.id.hasPrefix("vt:") {
+                    Button("Add '\(node.name)' to Watch 1") { workspace.debugger.watchExpressions.append(node.name) }
+                }
+                if node.id.hasPrefix("f:"), let address = node.address {
+                    Button("Set Breakpoint") { workspace.addAddressBreakpoint(address) }
+                }
+            }
+            if open {
+                ForEach(node.children) { tree($0, level: level + 1) }
+            }
+        })
     }
 }
 

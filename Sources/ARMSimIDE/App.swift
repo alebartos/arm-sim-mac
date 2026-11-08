@@ -36,6 +36,7 @@ struct ARMSimApp: App {
         Window("Pack Installer", id: "packs") { PackInstallerView() }
         Window("Logic Analyzer", id: "logic") { LogicAnalyzerView() }
         Window("Toolbox", id: "toolbox") { ToolboxWindow() }
+            .windowResizability(.contentSize)
     }
 }
 
@@ -377,6 +378,13 @@ extension SmokeTest {
                 ws.showBreakpoints = true
             }
         }
+        // ARMSIM_SHOT_TABS=<left>,<bottom right>: select those dock tabs (e.g. 2,1 = Symbols + Watch 1).
+        if let tabs = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TABS"]?.split(separator: ",").compactMap({ Int($0) }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 5.5 : 2)) {
+                if let left = tabs.first { WindowLayout.shared.leftTab = left }
+                if tabs.count > 1 { WindowLayout.shared.bottomRightTab = tabs[1] }
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6.5 : 2.5)) {
             // ARMSIM_SHOT_VIEW=gpio<n>|timer<n>: render that peripheral window instead of the main window.
             if let name = ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] {
@@ -387,6 +395,7 @@ extension SmokeTest {
                 case "systick": view = AnyView(SysTickWindow())
                 case "faults": view = AnyView(FaultReportsWindow())
                 case "pinconnect": view = AnyView(PinConnectWindow())
+                case "toolbox": view = AnyView(ToolboxWindow())
                 default: view = name.hasPrefix("timer") ? AnyView(TimerWindow(index: index)) : AnyView(GPIOWindow(port: index))
                 }
                 let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))

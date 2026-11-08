@@ -458,7 +458,8 @@ final class DebugController: ObservableObject {
             executed &+= chunk
             if reason != .instructionLimit { return describe(reason, pc: pc, sim: sim) }
             if let condition, condition(sim) { return nil }
-            if Date().timeIntervalSince(lastPublish) > 0.1 && (product?.options.periodicUpdate ?? true) {
+            if Date().timeIntervalSince(lastPublish) > 0.1 && ((product?.options.periodicUpdate ?? true) || updateRequested) {
+                updateRequested = false
                 lastPublish = Date()
                 publish(stopMessage: nil, stillRunning: true)
             }
@@ -540,6 +541,14 @@ final class DebugController: ObservableObject {
     }
 
     /// Called on the simulation queue.
+    /// Set by Toolbox ▸ Update Windows: refresh the windows once while running, even without periodic update.
+    private var updateRequested = false
+
+    /// Toolbox ▸ Update Windows.
+    func updateWindows() {
+        if isRunning { updateRequested = true } else { objectWillChange.send() }
+    }
+
     private func publish(stopMessage: String?, stillRunning: Bool = false) {
         guard let sim = simulator else {
             DispatchQueue.main.async { self.isRunning = false }
