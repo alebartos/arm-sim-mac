@@ -186,7 +186,8 @@ final class Workspace: ObservableObject {
     /// The µVision options file (.uvoptx: breakpoints, watch and memory windows, debug settings).
     private var uvOptionsDocument: XMLDocument?
     /// What was loaded from it, to write it back only when the user changed something.
-    private var uvOptionsLoaded: (breakpoints: Set<SourceBreakpoint>, watch: [String], watch2: [String], memory: String?, ini: String?)?
+    private var uvOptionsLoaded: (breakpoints: Set<SourceBreakpoint>, disabled: Set<SourceBreakpoint>, watch: [String], watch2: [String],
+                                  memory: String?, ini: String?)?
 
     private func uvTargetNode(_ index: Int) -> XMLElement? {
         (try? uvDocument?.nodes(forXPath: "/Project/Targets/Target"))?.compactMap { $0 as? XMLElement }[safe: index]
@@ -686,15 +687,19 @@ final class Workspace: ObservableObject {
         func text(_ path: String, in node: XMLNode) -> String? {
             (try? node.nodes(forXPath: path))?.first?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        var loaded = Set<SourceBreakpoint>()
+        var loaded = Set<SourceBreakpoint>(), disabled = Set<SourceBreakpoint>()
         for bp in (try? target.nodes(forXPath: "TargetOption/Breakpoint/Bp")) ?? [] {
-            guard text("Type", in: bp) == "0", text("EnabledFlag", in: bp) != "0",
+            guard text("Type", in: bp) == "0",
                   let file = text("Filename", in: bp), !file.isEmpty,
                   let line = Int(text("LineNumber", in: bp) ?? "") else { continue }
             let path = canonicalPath(dir.appendingPathComponent(file.replacingOccurrences(of: "\\", with: "/")).path)
-            loaded.insert(SourceBreakpoint(path: path, line: line))
+            let point = SourceBreakpoint(path: path, line: line)
+            loaded.insert(point)
+            // µVision keeps disabled breakpoints with EnabledFlag 0 (grey circle in the margin).
+            if text("EnabledFlag", in: bp) == "0" { disabled.insert(point) }
         }
         breakpoints = loaded
+        disabledBreakpoints = disabled
         var watch: [String] = [], watch2: [String] = []
         for window in ["WatchWindow1", "WatchWindow2"] {
             for item in (try? target.nodes(forXPath: "TargetOption/\(window)/Ww/ItemText")) ?? [] {
@@ -709,7 +714,7 @@ final class Workspace: ObservableObject {
         if let memory, !memory.isEmpty { UserDefaults.standard.set(memory, forKey: "memoryAddress") }
         let ini = text("TargetOption/DebugOpt/sIfile", in: target) ?? ""
         let iniPath = ini.isEmpty ? nil : ini.replacingOccurrences(of: "\\", with: "/")
-        uvOptionsLoaded = (loaded, watch, watch2, memory, iniPath)
+        uvOptionsLoaded = (loaded, disabled, watch, watch2, memory, iniPath)
         if var project {
             if let goMain = text("TargetOption/DebugOpt/sGomain", in: target) { project.options.runToMain = goMain != "0" }
             project.options.debugIniFile = iniPath
@@ -725,7 +730,8 @@ final class Workspace: ObservableObject {
         let memory = UserDefaults.standard.string(forKey: "memoryAddress")
         let watch = debugger.watchExpressions
         let ini = project?.options.debugIniFile
-        guard loaded.breakpoints != breakpoints || loaded.watch != watch || (loaded.memory != nil && loaded.memory != memory)
+        let disabled = disabledBreakpoints.intersection(breakpoints)
+        guard loaded.breakpoints != breakpoints || loaded.disabled != disabled || loaded.watch != watch || (loaded.memory != nil && loaded.memory != memory)
                 || loaded.ini != ini
         else { return }
         if loaded.ini != ini, let item = (try? option.nodes(forXPath: "DebugOpt/sIfile"))?.first {
@@ -769,13 +775,17 @@ final class Workspace: ObservableObject {
             return SourceBreakpoint(path: canonicalPath(dir.appendingPathComponent(file.replacingOccurrences(of: "\\", with: "/")).path),
                                     line: line)
         }
-        if loaded.breakpoints != breakpoints {
+        if loaded.breakpoints != breakpoints || loaded.disabled != disabled {
             let existing = option.elements(forName: "Breakpoint").first
             var present = Set<SourceBreakpoint>()
             // Remove µVision entries the user cleared (with the whitespace before them); keep the rest as is.
             for bp in existing?.elements(forName: "Bp") ?? [] {
                 guard let k = key(bp) else { continue }
-                if breakpoints.contains(k) { present.insert(k); continue }
+                if breakpoints.contains(k) {
+                    present.insert(k)
+                    bp.elements(forName: "EnabledFlag").first?.stringValue = disabled.contains(k) ? "0" : "1"
+                    continue
+                }
                 let i = bp.index
                 existing?.removeChild(at: i)
                 if i > 0, existing?.child(at: i - 1)?.kind == .text { existing?.removeChild(at: i - 1) }
@@ -786,7 +796,7 @@ final class Workspace: ObservableObject {
                 let address = lastProduct?.debugInfo.firstAddress(for: SourceLocation(path: bp.path, line: bp.line)) ?? 0
                 let node = XMLElement(name: "Bp")
                 for child in [element("Number", "0"), element("Type", "0"), element("LineNumber", "\(bp.line)"),
-                              element("EnabledFlag", "1"), element("Address", "\(address)"), element("ByteObject", "0"),
+                              element("EnabledFlag", disabled.contains(bp) ? "0" : "1"), element("Address", "\(address)"), element("ByteObject", "0"),
                               element("HtxType", "0"), element("ManyObjects", "0"), element("SizeOfObject", "0"),
                               element("BreakByAccess", "0"), element("BreakIfRCount", "1"),
                               element("Filename", ".\\" + relative.replacingOccurrences(of: "/", with: "\\")),
@@ -839,18 +849,27 @@ final class Workspace: ObservableObject {
            let item = (try? option.nodes(forXPath: "MemoryWindow1/Mm/ItemText"))?.first {
             item.stringValue = memory
         }
-        // Same text as µVision writes: its XML declaration and <a></a> for empty elements.
+        // Same text as µVision writes: its XML declaration and <a></a> for empty elements, except those µVision
+        // itself wrote self-closed in this file (e.g. <Breakpoint/> of a target without breakpoints).
         var text = xml.xmlString(options: [.nodePreserveAll])
+        let original = try? String(contentsOf: url, encoding: .utf8)
         if let empty = try? NSRegularExpression(pattern: #"<([A-Za-z_][\w.-]*)/>"#) {
-            text = empty.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "<$1></$1>")
+            let source = original ?? ""
+            let selfClosed = Set(empty.matches(in: source, range: NSRange(source.startIndex..., in: source))
+                .compactMap { Range($0.range(at: 1), in: source).map { String(source[$0]) } })
+            for match in empty.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+                guard let whole = Range(match.range, in: text), let name = Range(match.range(at: 1), in: text) else { continue }
+                let tag = String(text[name])
+                if !selfClosed.contains(tag) { text.replaceSubrange(whole, with: "<\(tag)></\(tag)>") }
+            }
         }
-        if let original = try? String(contentsOf: url, encoding: .utf8), let firstLine = original.components(separatedBy: "\n").first,
+        if let original, let firstLine = original.components(separatedBy: "\n").first,
            firstLine.hasPrefix("<?xml"), let end = text.range(of: "?>") {
             text = firstLine.trimmingCharacters(in: .newlines) + "\n" + text[end.upperBound...].drop { $0 == "\n" || $0 == "\r" }
         }
         if !text.hasSuffix("\n") { text += "\n" }
         try? text.write(to: url, atomically: true, encoding: .utf8)
-        uvOptionsLoaded = (breakpoints, watch, window2, memory, ini)
+        uvOptionsLoaded = (breakpoints, disabled, watch, window2, memory, ini)
     }
 
     // MARK: Breakpoints

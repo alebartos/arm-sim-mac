@@ -235,6 +235,14 @@ extension SmokeTest {
         if let pot = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_POT"].flatMap(Double.init) { d.potentiometer = pot }
         say("keil image: \(ws.keilImageURL?.path ?? "none")")
         say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
+        say("uvoptx disabled: \(ws.disabledBreakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted())")
+        // ARMSIM_SMOKE_DISABLEBP=1: disable every breakpoint and write the .uvoptx (EnabledFlag round trip).
+        if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_DISABLEBP"] != nil {
+            ws.disableAllBreakpoints()
+            ws.saveUVOptions()
+            say("uvoptx saved with \(ws.disabledBreakpoints.count) disabled breakpoints")
+            exit(0)
+        }
         if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_NOBP"] != nil { ws.removeAllBreakpoints() }
         if let ini = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_INI"] { ws.project?.options.debugIniFile = ini }
         if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }
