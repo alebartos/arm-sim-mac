@@ -19,10 +19,15 @@ struct ProjectPanel: View {
                                   text: project.targetName)
                         .contextMenu {
                             Button("Options for Target '\(project.targetName)'…") { workspace.showOptions = true }
-                            Button("Add Group…") { workspace.addGroup() }
                             Divider()
-                            Button("Build Target") { workspace.build() }
+                            Button("Add Group…") { workspace.addGroup() }
+                            Button("Manage Project Items…") { workspace.addGroup() }
+                            Button("Open Map File") { workspace.openMapFile() }
+                            Button("Open Build Log") { WindowLayout.shared.showBuildOutput = true }
                             Button("Rebuild all target files") { workspace.build(rebuild: true) }
+                            Button("Build Target") { workspace.build() }
+                            Divider()
+                            Toggle("Show Include File Dependencies", isOn: .constant(false)).disabled(true)
                         }
                     if targetExpanded {
                         ForEach(project.groups) { group in
@@ -62,11 +67,21 @@ struct ProjectPanel: View {
             disclosureRow(level: 2, expanded: isExpanded, icon: "folder.fill", color: Color(red: 0.95, green: 0.75, blue: 0.25),
                           text: group.name)
                 .contextMenu {
-                    Button("Add New Item to Group '\(group.name)'…") { Actions.addNewItem(to: group.id) }
+                    Button("Options for Group '\(group.name)'…") {}.disabled(true)
+                    Divider()
+                    Button("Add New  Item to Group '\(group.name)'…") { Actions.addNewItem(to: group.id) }
                     Button("Add Existing Files to Group '\(group.name)'…") { Actions.addExistingFiles(to: group.id) }
+                    Button("Remove Group '\(group.name)' and its Files") { workspace.removeGroup(group.id) }
+                    Divider()
+                    Button("Open Build Log") { WindowLayout.shared.showBuildOutput = true }
+                    Button("Rebuild all target files") { workspace.build(rebuild: true) }
+                    Button("Build Target") { workspace.build() }
+                    Divider()
+                    Button("Manage Project Items…") { workspace.addGroup() }
+                    Divider()
+                    Toggle("Show Include File Dependencies", isOn: .constant(false)).disabled(true)
                     Divider()
                     Button("Rename Group") { renameText = group.name; renaming = group.id }
-                    Button("Remove Group '\(group.name)' and its Files") { workspace.removeGroup(group.id) }
                 }
         }
         if isExpanded.wrappedValue {
@@ -93,12 +108,21 @@ struct ProjectPanel: View {
             }
             .simultaneousGesture(TapGesture().onEnded { selectedFile = file })
             .contextMenu {
+                Button("Options for File '\(name)'…") {}.disabled(true)
+                Button("Remove File '\(name)'") { workspace.removeFile(file, fromGroup: group.id) }
+                Divider()
+                Button("Manage Project Items…") { workspace.addGroup() }
                 Button("Open \(name)") { if let url = workspace.url(forRelative: file) { workspace.openDocument(url) } }
+                Button("Open Build Log") { WindowLayout.shared.showBuildOutput = true }
+                Button("Rebuild all target files") { workspace.build(rebuild: true) }
+                Button("Build Target") { workspace.build() }
+                Divider()
                 Button("Translate \(name)") {
                     if let url = workspace.url(forRelative: file) { workspace.openDocument(url); workspace.translateActiveFile() }
                 }
                 Divider()
-                Button("Remove File '\(name)'") { workspace.removeFile(file, fromGroup: group.id) }
+                Toggle("Show Include File Dependencies", isOn: .constant(false)).disabled(true)
+                Divider()
                 Button("Show in Finder") {
                     if let url = workspace.url(forRelative: file) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                 }

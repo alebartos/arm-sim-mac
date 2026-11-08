@@ -505,6 +505,15 @@ final class Workspace: ObservableObject {
         }
     }
 
+    /// Target context menu ▸ Open Map File: the armlink-style map of the last build.
+    func openMapFile() {
+        guard let project, let dir = projectDirectory else { return }
+        let output = project.options.outputDirectory ?? "Objects"
+        let listings = dir.appendingPathComponent(output.hasPrefix("ARMSim_") ? "ARMSim_Listings" : "Listings")
+        let map = listings.appendingPathComponent(project.options.outputName + ".map")
+        if FileManager.default.fileExists(atPath: map.path) { openDocument(map) } else { NSSound.beep() }
+    }
+
     /// Project ▸ Clean Targets: deletes the build output of the active target (ARM Sim's own folder).
     func cleanTargets() {
         guard let project, let dir = projectDirectory, !isBuilding, mode == .edit else { return }

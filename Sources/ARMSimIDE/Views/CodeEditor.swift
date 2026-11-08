@@ -25,7 +25,7 @@ struct CodeEditor: NSViewRepresentable {
         container.widthTracksTextView = false
         layout.addTextContainer(container)
 
-        let textView = NSTextView(frame: .zero, textContainer: container)
+        let textView = EditorTextView(frame: .zero, textContainer: container)
         textView.isRichText = false
         textView.usesFindBar = true
         textView.allowsUndo = true
@@ -162,6 +162,130 @@ struct CodeEditor: NSViewRepresentable {
             gutter.needsDisplay = true
         }
     }
+}
+
+/// Source text view with µVision's editor context menu.
+final class EditorTextView: NSTextView {
+    private var ws: Workspace { Workspace.shared }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        // Right-click moves the caret first, like µVision, so line commands act on the clicked line.
+        let index = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+        if selectedRange().length == 0 || !NSLocationInRange(index, selectedRange()) {
+            setSelectedRange(NSRange(location: index, length: 0))
+        }
+        let text = string as NSString
+        let line = text.substring(to: min(index, text.length)).reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        let lineText = text.substring(with: text.lineRange(for: NSRange(location: min(index, text.length), length: 0)))
+        let include = Self.includeName(in: lineText)
+        let path = ws.activeDocument?.path
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func add(_ title: String, key: String = "", enabled: Bool = true, action: (() -> Void)? = nil) {
+            let item = ClosureMenuItem(title: title, keyEquivalent: key, action: action)
+            item.isEnabled = enabled && action != nil
+            menu.addItem(item)
+        }
+        add("Split Window horizontally", enabled: false)
+        menu.addItem(.separator())
+        add(include.map { "Open document \"\($0)\"" } ?? "Open document", enabled: include != nil) { [weak self] in
+            if let include, let url = self?.findFile(include) { Workspace.shared.openDocument(url) } else { NSSound.beep() }
+        }
+        add("Insert '#include file'", enabled: false)
+        add("Toggle Header/Code File", enabled: path != nil) { [weak self] in
+            if let url = self?.companionFile() { Workspace.shared.openDocument(url) } else { NSSound.beep() }
+        }
+        menu.addItem(.separator())
+        add("Insert/Remove Breakpoint", enabled: path != nil) {
+            if let path { Workspace.shared.toggleBreakpoint(path: path, line: line) }
+        }
+        add("Enable/Disable Breakpoint", enabled: path.map { ws.breakpoints.contains(SourceBreakpoint(path: $0, line: line)) } ?? false) {
+            Workspace.shared.cursorLine = line
+            Workspace.shared.toggleBreakpointEnabledAtCursor()
+        }
+        menu.addItem(.separator())
+        add("Refresh Source Browser View", enabled: false)
+        add("Update Source Browser Information", enabled: false)
+        menu.addItem(.separator())
+        add("Insert/Remove Bookmark", enabled: path != nil) {
+            if let path { Bookmarks.shared.toggle(path: path, line: line) }
+        }
+        add("Undo", enabled: undoManager?.canUndo ?? false) { [weak self] in self?.undoManager?.undo() }
+        add("Redo", enabled: undoManager?.canRedo ?? false) { [weak self] in self?.undoManager?.redo() }
+        let hasSelection = selectedRange().length > 0
+        add("Cut", enabled: hasSelection) { [weak self] in self?.cut(nil) }
+        add("Copy", enabled: hasSelection) { [weak self] in self?.copy(nil) }
+        add("Paste", enabled: NSPasteboard.general.string(forType: .string) != nil) { [weak self] in self?.paste(nil) }
+        add("Select All") { [weak self] in self?.selectAll(nil) }
+        menu.addItem(.separator())
+        let outlining = NSMenuItem(title: "Outlining", action: nil, keyEquivalent: "")
+        outlining.submenu = NSMenu()
+        outlining.isEnabled = false
+        menu.addItem(outlining)
+        let advanced = NSMenuItem(title: "Advanced", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for (title, action) in [("Make Uppercase", { EditorCommands.changeCase(upper: true) }),
+                                ("Make Lowercase", { EditorCommands.changeCase(upper: false) }),
+                                ("Comment Selection", EditorCommands.comment),
+                                ("Uncomment Selection", EditorCommands.uncomment),
+                                ("Indent Selection", EditorCommands.indent),
+                                ("Unindent Selection", EditorCommands.unindent)] as [(String, () -> Void)] {
+            sub.addItem(ClosureMenuItem(title: title, keyEquivalent: "", action: action))
+        }
+        advanced.submenu = sub
+        menu.addItem(advanced)
+        return menu
+    }
+
+    /// `#include "file.h"` or `#include <file.h>` on the line.
+    static func includeName(in line: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"^\s*#\s*include\s*[<"]([^>"]+)[>"]"#),
+              let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) else { return nil }
+        return (line as NSString).substring(with: match.range(at: 1))
+    }
+
+    /// Next to the current file, then anywhere in the project folder.
+    private func findFile(_ relative: String) -> URL? {
+        let fm = FileManager.default
+        if let path = ws.activeDocument?.path {
+            let near = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(relative)
+            if fm.fileExists(atPath: near.path) { return near }
+        }
+        guard let dir = ws.projectDirectory,
+              let files = fm.enumerator(at: dir, includingPropertiesForKeys: nil) else { return nil }
+        let suffix = "/" + relative
+        for case let url as URL in files where url.path.hasSuffix(suffix) { return url }
+        return nil
+    }
+
+    /// file.c <-> file.h
+    private func companionFile() -> URL? {
+        guard let path = ws.activeDocument?.path else { return nil }
+        let url = URL(fileURLWithPath: path)
+        let ext = url.pathExtension.lowercased()
+        let other = ext == "h" ? ["c", "cpp", "s"] : ["h"]
+        for e in other {
+            let name = url.deletingPathExtension().lastPathComponent + "." + e
+            if let found = findFile(name) { return found }
+        }
+        return nil
+    }
+}
+
+/// NSMenuItem running a closure.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: (() -> Void)?
+
+    init(title: String, keyEquivalent: String, action handler: (() -> Void)?) {
+        self.handler = handler
+        super.init(title: title, action: handler == nil ? nil : #selector(run), keyEquivalent: keyEquivalent)
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func run() { handler?() }
 }
 
 /// Recent macOS lays the vertical ruler over the clip view instead of beside it, hiding the first
