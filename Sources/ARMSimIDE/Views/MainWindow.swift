@@ -9,10 +9,16 @@ struct MainWindow: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            FileToolbar(workspace: workspace)
-                .background(UVColors.toolbar)
+            if layout.showFileToolbar {
+                FileToolbar(workspace: workspace)
+                    .background(UVColors.toolbar)
+            }
             Group {
-                if workspace.mode == .debug { DebugToolbar(workspace: workspace) } else { BuildToolbar(workspace: workspace) }
+                if workspace.mode == .debug {
+                    if layout.showDebugToolbar { DebugToolbar(workspace: workspace) }
+                } else if layout.showBuildToolbar {
+                    BuildToolbar(workspace: workspace)
+                }
             }
             .background(UVColors.toolbar)
             .overlay(Rectangle().frame(height: 1).foregroundColor(UVColors.border), alignment: .bottom)
@@ -32,7 +38,7 @@ struct MainWindow: View {
                 bottomPane
                     .frame(minHeight: 170, idealHeight: 220)
             }
-            StatusBar(workspace: workspace)
+            if layout.showStatusBar { StatusBar(workspace: workspace) }
         }
         .background(UVColors.chrome)
         .preferredColorScheme(.light)

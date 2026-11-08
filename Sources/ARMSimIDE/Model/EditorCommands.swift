@@ -78,13 +78,50 @@ enum EditorCommands {
         view.showFindIndicator(for: match)
     }
 
-    /// Find… (Ctrl+F) and Incremental Find (Ctrl+I): the editor's find bar.
-    static func showFindBar(incremental: Bool = false) {
+    /// Find… (Ctrl+F), Replace… (Ctrl+H) and Incremental Find (Ctrl+I): the editor's find bar.
+    static func showFindBar(incremental: Bool = false, replace: Bool = false) {
         guard let view = textView else { return }
         view.window?.makeFirstResponder(view)
         view.isIncrementalSearchingEnabled = incremental
         let item = NSMenuItem()
-        item.tag = NSTextFinder.Action.showFindInterface.rawValue
+        item.tag = (replace ? NSTextFinder.Action.showReplaceInterface : NSTextFinder.Action.showFindInterface).rawValue
         view.performFindPanelAction(item)
+    }
+
+    /// Edit ▸ Advanced ▸ Make Uppercase / Make Lowercase (selection, or the word at the cursor).
+    static func changeCase(upper: Bool) {
+        guard let view = textView else { return }
+        var range = view.selectedRange()
+        if range.length == 0 { range = view.selectionRange(forProposedRange: range, granularity: .selectByWord) }
+        let text = (view.string as NSString).substring(with: range)
+        replace(range, in: view, with: upper ? text.uppercased() : text.lowercased())
+    }
+
+    /// Edit ▸ Advanced ▸ Delete Trailing White Space (whole file).
+    static func deleteTrailingWhiteSpace() {
+        guard let view = textView else { return }
+        let lines = view.string.components(separatedBy: "\n").map { line -> String in
+            var line = line
+            let hasCR = line.hasSuffix("\r")
+            if hasCR { line.removeLast() }
+            while let last = line.last, last == " " || last == "\t" { line.removeLast() }
+            return hasCR ? line + "\r" : line
+        }
+        replace(NSRange(location: 0, length: (view.string as NSString).length), in: view, with: lines.joined(separator: "\n"))
+    }
+
+    /// Edit ▸ Advanced ▸ Cut Current Line (Ctrl+L): the line goes to the clipboard.
+    static func cutCurrentLine() {
+        guard let view = textView else { return }
+        let range = (view.string as NSString).lineRange(for: NSRange(location: view.selectedRange().location, length: 0))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString((view.string as NSString).substring(with: range), forType: .string)
+        replace(range, in: view, with: "")
+    }
+
+    private static func replace(_ range: NSRange, in view: NSTextView, with text: String) {
+        guard view.shouldChangeText(in: range, replacementString: text) else { return }
+        view.textStorage?.replaceCharacters(in: range, with: text)
+        view.didChangeText()
     }
 }

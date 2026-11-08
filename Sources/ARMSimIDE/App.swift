@@ -7,6 +7,11 @@ import UniformTypeIdentifiers
 struct ARMSimApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    init() {
+        // No Dictation / Emoji items in the Edit menu (µVision's Edit menu ends with Configuration…).
+        UserDefaults.standard.register(defaults: ["NSDisabledDictationMenuItem": true, "NSDisabledCharacterPaletteMenuItem": true])
+    }
+
     var body: some Scene {
         Window("ARM Sim", id: "main") {
             MainWindow()
@@ -63,155 +68,6 @@ func functionKey(_ n: Int) -> KeyEquivalent {
     KeyEquivalent(Character(UnicodeScalar(0xF703 + n)!))
 }
 
-struct AppCommands: Commands {
-    private var ws: Workspace { Workspace.shared }
-
-    var body: some Commands {
-        CommandGroup(replacing: .newItem) {
-            Button("New") { Actions.newFile() }.keyboardShortcut("n")
-            Button("Open…") { Actions.openFile() }.keyboardShortcut("o")
-            Button("Close") { if let id = ws.activeDocumentID { ws.closeDocument(id) } }.keyboardShortcut("w")
-        }
-        CommandGroup(replacing: .saveItem) {
-            Button("Save") { ws.activeDocument?.save() }.keyboardShortcut("s")
-            Button("Save All") { ws.saveAll() }.keyboardShortcut("s", modifiers: [.command, .option])
-        }
-
-        CommandGroup(after: .textEditing) {
-            Button("Find in Files…") { FindInFiles.shared.showDialog = true }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-            Button("Go to Line…") { ws.showGoToLine = true }.keyboardShortcut("l")
-            Divider()
-            Button("Toggle Bookmark") { if let d = ws.activeDocument { Bookmarks.shared.toggle(path: d.path, line: ws.cursorLine) } }
-                .keyboardShortcut(functionKey(2), modifiers: [.command])
-            Button("Next Bookmark") {
-                if let d = ws.activeDocument, let b = Bookmarks.shared.next(after: SourceLocation(path: d.path, line: ws.cursorLine)) { ws.reveal(b) }
-            }
-            .keyboardShortcut(functionKey(2), modifiers: [])
-            Button("Previous Bookmark") {
-                if let d = ws.activeDocument, let b = Bookmarks.shared.previous(before: SourceLocation(path: d.path, line: ws.cursorLine)) { ws.reveal(b) }
-            }
-            .keyboardShortcut(functionKey(2), modifiers: [.shift])
-            Button("Clear All Bookmarks") { Bookmarks.shared.clearAll() }
-                .keyboardShortcut(functionKey(2), modifiers: [.control, .shift])
-        }
-
-        CommandMenu("Project") {
-            Button("New Project…") { Actions.newProject() }
-            Button("Open Project…") { Actions.openProject() }
-            Button("Import µVision Project (.uvprojx)…") { Actions.openProject(uvision: true) }
-            Button("Close Project") { ws.closeProject() }
-            Divider()
-            Button("Select Device for Target…") { ws.showDeviceSelection = ws.project != nil }
-            PackInstallerMenuItem()
-            Button("Manage Project Items… (add group)") { ws.addGroup() }
-            Divider()
-            Button("Options for Target…") { ws.showOptions = ws.project != nil }
-                .keyboardShortcut(functionKey(7), modifiers: [.option])
-            Divider()
-            Button("Translate") { ws.translateActiveFile() }.keyboardShortcut(functionKey(7), modifiers: [.control])
-            Button("Build Target") { ws.build() }.keyboardShortcut(functionKey(7), modifiers: [])
-            Button("Rebuild all target files") { ws.build(rebuild: true) }
-            Button("Batch Build…") { ws.build(rebuild: true) }
-        }
-
-        CommandMenu("Flash") {
-            Button("Download") { ws.build() }.keyboardShortcut(functionKey(8), modifiers: [])
-            Button("Erase") {}.disabled(true)
-            Divider()
-            Button("Configure Flash Tools…") { ws.showOptions = ws.project != nil }
-        }
-
-        CommandMenu("Debug") {
-            Button("Start/Stop Debug Session") { ws.toggleDebugSession() }.keyboardShortcut(functionKey(5), modifiers: [.command])
-            Button("Start Debug Session with Keil Image") { ws.startDebugWithKeilImage() }
-                .disabled(ws.mode == .debug || ws.keilImageURL == nil)
-            Button("Reset CPU") { ws.debugger.reset() }
-            Button("Run") { ws.debugger.run() }.keyboardShortcut(functionKey(5), modifiers: [])
-            Button("Stop") { ws.debugger.stop() }
-            Divider()
-            Button("Step") { ws.debugger.stepInto() }.keyboardShortcut(functionKey(11), modifiers: [])
-            Button("Step Over") { ws.debugger.stepOver() }.keyboardShortcut(functionKey(10), modifiers: [])
-            Button("Step Out") { ws.debugger.stepOut() }.keyboardShortcut(functionKey(11), modifiers: [.control])
-            Button("Run to Cursor Line") { ws.runToCursor() }.keyboardShortcut(functionKey(10), modifiers: [.control])
-            Button("Show Next Statement") { ws.showNextStatement() }
-            CodeCoverageMenuItem()
-            Divider()
-            Button("Step Instruction (disassembly level)") { ws.debugger.stepInto(instructionLevel: true) }
-                .keyboardShortcut(functionKey(11), modifiers: [.shift])
-            // macOS reserves F11 for "Show Desktop": alternatives that always work.
-            Menu("Alternate Shortcuts (if F10/F11 are taken by macOS)") {
-                Button("Step") { ws.debugger.stepInto() }.keyboardShortcut("i", modifiers: [.command, .option])
-                Button("Step Over") { ws.debugger.stepOver() }.keyboardShortcut("o", modifiers: [.command, .option])
-                Button("Step Out") { ws.debugger.stepOut() }.keyboardShortcut("u", modifiers: [.command, .option])
-                Button("Run to Cursor Line") { ws.runToCursor() }.keyboardShortcut("r", modifiers: [.command, .option])
-            }
-            Divider()
-            Button("Insert/Remove Breakpoint") { ws.toggleBreakpointAtCursor() }.keyboardShortcut(functionKey(9), modifiers: [])
-            Button("Kill All Breakpoints in Current Target") { ws.removeAllBreakpoints() }
-                .keyboardShortcut(functionKey(9), modifiers: [.control, .shift])
-        }
-
-        CommandMenu("Peripherals") { PeripheralsMenu() }
-
-        CommandMenu("Tools") {
-            Button("Set-up PC-Lint…") {}.disabled(true)
-            Button("Customize Tools Menu…") {}.disabled(true)
-        }
-        CommandMenu("SVCS") {
-            Button("Configure Software Version Control…") {}.disabled(true)
-        }
-
-        CommandGroup(after: .sidebar) {
-            ViewMenuItems()
-        }
-
-        CommandGroup(after: .help) {
-            Button("Star ARM Sim on GitHub…") { StarPrompt.openRepository() }
-        }
-    }
-}
-
-struct PeripheralsMenu: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Menu("Core Peripherals") {
-            Button("Nested Vectored Interrupt Controller") { openWindow(id: "nvic") }
-            Button("System Tick Timer (SysTick)") { openWindow(id: "systick") }
-            Button("Fault Reports") { openWindow(id: "faults") }
-        }
-        Menu("System Viewer") { SystemViewerMenu() }
-        Divider()
-        Button("GPIO Fast Interface") { openWindow(id: "gpio") }
-        Button("LandTiger Board (LEDs / Buttons)") { openWindow(id: "landtiger") }
-    }
-}
-
-struct ViewMenuItems: View {
-    @ObservedObject var layout = WindowLayout.shared
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Menu("Analysis Windows") {
-            Button("Logic Analyzer") { openWindow(id: "logic") }
-            Button("Code Coverage") { openWindow(id: "coverage") }
-        }
-        Toggle("Project Window", isOn: $layout.showProject)
-        Toggle("Build Output Window", isOn: $layout.showBuildOutput)
-        Divider()
-        Toggle("Command Window", isOn: $layout.showCommand)
-        Button("Toolbox Window") { openWindow(id: "toolbox") }
-        Toggle("Disassembly Window", isOn: $layout.showDisassembly)
-        Toggle("Registers Window", isOn: $layout.showRegisters)
-        Button("Call Stack Window") { layout.showBottomRight = true; layout.bottomRightTab = 0 }
-        Button("Watch Window") { layout.showBottomRight = true; layout.bottomRightTab = 1 }
-        Button("Memory Window") { layout.showBottomRight = true; layout.bottomRightTab = 2 }
-        Button("Serial Window: Debug (printf) Viewer") { layout.showBottomRight = true; layout.bottomRightTab = 3 }
-        Divider()
-    }
-}
-
 // MARK: - Open / save panels
 
 enum Actions {
@@ -225,6 +81,22 @@ enum Actions {
             ws.open(projectURL: url)
         } else {
             ws.openDocument(url)
+        }
+    }
+
+    /// File ▸ Save As…: writes the active file under a new name and continues editing that file.
+    static func saveAs() {
+        guard let document = ws.activeDocument else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = document.url.lastPathComponent
+        panel.directoryURL = document.url.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try document.text.write(to: url, atomically: true, encoding: .utf8)
+            ws.closeDocument(document.id)
+            ws.openDocument(url)
+        } catch {
+            NSAlert.show("Cannot save \(url.lastPathComponent)", error.localizedDescription)
         }
     }
 
@@ -486,6 +358,19 @@ extension SmokeTest {
         }
         if debug { ws.toggleDebugSession() }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2)) {
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_MENUS"] != nil, let menu = NSApp.mainMenu {
+                func dump(_ menu: NSMenu, _ depth: Int) {
+                    for item in menu.items {
+                        let title = item.isSeparatorItem ? "----" : item.title + (item.isEnabled ? "" : "  (disabled)")
+                        FileHandle.standardError.write(Data(("[menu] " + String(repeating: "  ", count: depth) + title + "\n").utf8))
+                        if let sub = item.submenu, depth < 2 {
+                            sub.delegate?.menuNeedsUpdate?(sub)   // SwiftUI refreshes items when a menu opens
+                            dump(sub, depth + 1)
+                        }
+                    }
+                }
+                dump(menu, 0)
+            }
             if ProcessInfo.processInfo.environment["ARMSIM_SHOT_DWARF"] != nil, let dwarf = ws.lastProduct?.dwarf {
                 let pc = ws.debugger.snapshot.r[15]
                 for f in dwarf.functions where f.contains(pc) || f.name == "main" || f.name == "init_timer" {

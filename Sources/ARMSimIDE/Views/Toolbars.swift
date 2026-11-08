@@ -4,6 +4,10 @@ import SwiftUI
 /// Visibility of the dockable debug windows (toggled from the Debug toolbar / View menu).
 final class WindowLayout: ObservableObject {
     static let shared = WindowLayout()
+    @Published var showStatusBar = true
+    @Published var showFileToolbar = true
+    @Published var showBuildToolbar = true
+    @Published var showDebugToolbar = true
     @Published var showProject = true
     @Published var showBuildOutput = true
     @Published var showCommand = true

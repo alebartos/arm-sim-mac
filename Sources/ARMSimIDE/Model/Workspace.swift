@@ -505,6 +505,21 @@ final class Workspace: ObservableObject {
         }
     }
 
+    /// Project ▸ Clean Targets: deletes the build output of the active target (ARM Sim's own folder).
+    func cleanTargets() {
+        guard let project, let dir = projectDirectory, !isBuilding, mode == .edit else { return }
+        let folder = dir.appendingPathComponent(project.options.outputDirectory ?? "Objects")
+        let generated: Set<String> = ["o", "axf", "d", "dep", "map", "htm", "lnp", "sct", "crf", "lst"]
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        for file in files where generated.contains(file.pathExtension.lowercased()) || file.lastPathComponent == ".buildflags" {
+            try? FileManager.default.removeItem(at: file)
+        }
+        buildLog = [LogLine(text: "Clean started - Project: '\(project.name)'"),
+                    LogLine(text: "Cleaning Target(s)..."),
+                    LogLine(text: "Clean done.")]
+        lastProduct = nil
+    }
+
     func translateActiveFile() {
         guard let project, let dir = projectDirectory, let document = activeDocument, !isBuilding else { return }
         saveAll()
