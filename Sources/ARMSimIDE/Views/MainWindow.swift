@@ -44,6 +44,7 @@ struct MainWindow: View {
         .preferredColorScheme(.light)
         .sheet(isPresented: $workspace.showOptions) { OptionsDialog(workspace: workspace) }
         .sheet(isPresented: $workspace.showManageItems) { ManageProjectItemsDialog(workspace: workspace) }
+        .sheet(isPresented: $workspace.showConfiguration) { ConfigurationDialog() }
         .sheet(isPresented: $workspace.showDeviceSelection) {
             DeviceSelectionDialog(initial: workspace.project?.options.device ?? "ARMCM3") { selection in
                 guard let selection, var project = workspace.project else { return }
@@ -365,25 +366,28 @@ struct BooksPanel: View {
     }
 }
 
+/// Project pane ▸ Templates: the Text Completion templates of the active file type (Edit ▸ Configuration).
+/// Double-click inserts one; "|" marks where the caret goes.
 struct TemplatesPanel: View {
     @ObservedObject var workspace = Workspace.shared
-    private let templates: [(String, String)] = [
-        ("if", "if (condition) {\n    \n}\n"),
-        ("for", "for (int i = 0; i < n; i++) {\n    \n}\n"),
-        ("while", "while (condition) {\n    \n}\n"),
-        ("switch", "switch (value) {\ncase 0:\n    break;\ndefault:\n    break;\n}\n"),
-        ("ISR", "void SysTick_Handler(void) {\n    \n}\n"),
-    ]
+    @ObservedObject var settings = EditorSettings.shared
 
     var body: some View {
-        List(templates, id: \.0) { template in
-            Text(template.0).font(UVColors.small)
-                .onTapGesture(count: 2) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(template.1, forType: .string)
-                    NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
-                }
+        let prefix = EditorSettings.prefix(for: workspace.activeDocument?.kind ?? .c)
+        List(settings.config.templates[prefix] ?? [], id: \.id) { template in
+            Text(template.name).font(UVColors.small)
+                .onTapGesture(count: 2) { insert(template.text) }
         }
         .listStyle(.plain)
+    }
+
+    private func insert(_ text: String) {
+        guard let editor = EditorCommands.lastEditor else { return }
+        let caret = (text as NSString).range(of: "|")
+        let plain = text.replacingOccurrences(of: "|", with: "")
+        let start = editor.selectedRange().location
+        editor.insertText(plain, replacementRange: editor.selectedRange())
+        if caret.location != NSNotFound { editor.setSelectedRange(NSRange(location: start + caret.location, length: 0)) }
+        editor.window?.makeFirstResponder(editor)
     }
 }

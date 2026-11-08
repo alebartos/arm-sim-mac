@@ -21,6 +21,12 @@ final class SourceDocument: ObservableObject, Identifiable {
     func save() {
         guard isDirty else { return }
         do {
+            // Edit ▸ Configuration ▸ Create Backup files (*.BAK): keep the previous version as <name>.BAK.
+            if EditorSettings.shared.config.createBackup, FileManager.default.fileExists(atPath: url.path) {
+                let backup = url.appendingPathExtension("BAK")
+                try? FileManager.default.removeItem(at: backup)
+                try? FileManager.default.copyItem(at: url, to: backup)
+            }
             try text.write(to: url, atomically: true, encoding: .utf8)
             isDirty = false
         } catch {
@@ -57,6 +63,8 @@ final class Workspace: ObservableObject {
     @Published var showDeviceSelection = false
     /// Project ▸ Manage ▸ Project Items… dialog.
     @Published var showManageItems = false
+    /// Edit ▸ Configuration… dialog.
+    @Published var showConfiguration = false
     /// Set by "New Project…": the device dialog is shown next, then the project is created.
     @Published var pendingNewProject: URL?
     @Published var showGoToLine = false
@@ -562,7 +570,9 @@ final class Workspace: ObservableObject {
             return
         }
         guard let project, let dir = projectDirectory, !isBuilding else { return }
-        saveAll()
+        let config = EditorSettings.shared.config
+        if config.saveFilesBeforeDebug { saveAll() }
+        if config.saveProjectBeforeDebug { saveProject() }
         buildLog = []
         isBuilding = true
         buildQueue.async {

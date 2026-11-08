@@ -67,7 +67,7 @@ struct AppCommands: Commands {
                 Button("Cut Current Line") { EditorCommands.cutCurrentLine() }.keyboardShortcut("l", modifiers: [.control])
             }
             Divider()
-            Button("Configuration…") {}.disabled(true)   // editor settings dialog: not implemented yet
+            Button("Configuration…") { Workspace.shared.showConfiguration = true }
         }
 
         // MARK: View

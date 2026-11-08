@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let i = args.firstIndex(of: "--smoke"), i + 1 < args.count {
             SmokeTest.run(folder: URL(fileURLWithPath: args[i + 1]))
         } else {
-            Workspace.shared.reopenLastProject()
+            if EditorSettings.shared.config.openMostRecentProject { Workspace.shared.reopenLastProject() }
             StarPrompt.showAtFirstLaunchIfNeeded()
         }
     }
@@ -369,6 +369,12 @@ extension SmokeTest {
             OptionsDialog.requestedTab = optionsTab
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ws.showOptions = true }
         }
+        // ARMSIM_SHOT_CONFIG=<tab>: capture Edit ▸ Configuration on that tab.
+        let configTab = ProcessInfo.processInfo.environment["ARMSIM_SHOT_CONFIG"].flatMap(Int.init)
+        if let configTab {
+            ConfigurationDialog.requestedTab = configTab
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ws.showConfiguration = true }
+        }
         // ARMSIM_SHOT_MANAGE=1: capture Project ▸ Manage ▸ Project Items.
         let manageSheet = ProcessInfo.processInfo.environment["ARMSIM_SHOT_MANAGE"] != nil
         if manageSheet {
@@ -422,7 +428,7 @@ extension SmokeTest {
                 }
                 exit(0)
             }
-            if optionsTab != nil || breakpointsSheet || manageSheet, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
+            if optionsTab != nil || breakpointsSheet || manageSheet || configTab != nil, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
                let view = sheet.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?.write(to: output)

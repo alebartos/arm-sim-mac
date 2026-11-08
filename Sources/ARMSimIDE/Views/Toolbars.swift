@@ -104,7 +104,7 @@ struct FileToolbar: View {
                 Button("Reset View to Defaults") { WindowLayout.shared.reset() }
             }
             ToolbarDivider()
-            ToolButton(icon: "wrench.adjustable", help: "Configuration… (editor settings, not available yet)", enabled: false) {}
+            ToolButton(icon: "wrench.adjustable", help: "Configuration…") { workspace.showConfiguration = true }
             Spacer()
         }
         .frame(height: 26)

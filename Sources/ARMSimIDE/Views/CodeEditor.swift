@@ -4,6 +4,7 @@ import SwiftUI
 /// Source editor: NSTextView + µVision-style gutter (line numbers, breakpoints, PC arrow).
 struct CodeEditor: NSViewRepresentable {
     @ObservedObject var document: SourceDocument
+    @ObservedObject var settings = EditorSettings.shared
     var breakpoints: Set<Int>
     var disabledBreakpoints: Set<Int> = []
     var bookmarks: Set<Int> = []
@@ -35,10 +36,7 @@ struct CodeEditor: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.smartInsertDeleteEnabled = false
-        textView.font = EditorStyle.font
-        let paragraph = EditorStyle.paragraph(for: document.kind)
-        textView.typingAttributes = [.font: EditorStyle.font, .foregroundColor: NSColor.black, .paragraphStyle: paragraph]
-        textView.backgroundColor = .white
+        textView.kind = document.kind
         textView.insertionPointColor = .black
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
@@ -46,9 +44,7 @@ struct CodeEditor: NSViewRepresentable {
         textView.minSize = NSSize(width: 0, height: 0)
         textView.autoresizingMask = [.width]
         textView.textContainerInset = NSSize(width: 4, height: 2)
-        textView.selectedTextAttributes = [.backgroundColor: NSColor(calibratedRed: 0.2, green: 0.45, blue: 0.85, alpha: 1),
-                                           .foregroundColor: NSColor.white]
-        textView.defaultParagraphStyle = paragraph
+        EditorStyle.applySettings(to: textView, kind: document.kind)
 
         let scroll = EditorScrollView()
         scroll.documentView = textView
@@ -70,6 +66,8 @@ struct CodeEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         EditorCommands.lastEditor = textView
         context.coordinator.gutter = gutter
+        context.coordinator.appliedConfig = settings.config
+        gutter.showLineNumbers = settings.config.fileType(document.kind).lineNumbers
         context.coordinator.load(document.text)
         return scroll
     }
@@ -81,8 +79,20 @@ struct CodeEditor: NSViewRepresentable {
         if coordinator.loadedRevision != document.externalRevision || coordinator.documentID != document.id {
             coordinator.documentID = document.id
             coordinator.loadedRevision = document.externalRevision
+            if let editor = textView as? EditorTextView, editor.kind != document.kind {
+                editor.kind = document.kind
+                EditorStyle.applySettings(to: textView, kind: document.kind)
+            }
             coordinator.load(document.text)
         }
+        // Edit ▸ Configuration changed: fonts, colours, tabs and line numbers apply at once.
+        if coordinator.appliedConfig != settings.config {
+            coordinator.appliedConfig = settings.config
+            EditorStyle.applySettings(to: textView, kind: document.kind)
+            coordinator.highlight()
+            gutter.invalidateLines()
+        }
+        gutter.showLineNumbers = settings.config.fileType(document.kind).lineNumbers
         gutter.breakpoints = breakpoints
         gutter.disabledBreakpoints = disabledBreakpoints
         gutter.bookmarks = bookmarks
@@ -104,6 +114,7 @@ struct CodeEditor: NSViewRepresentable {
         var documentID: String = ""
         var loadedRevision = -1
         var lastRevealToken = -1
+        var appliedConfig: EditorConfig?
         private var highlightScheduled = false
 
         init(_ parent: CodeEditor) {
@@ -135,6 +146,7 @@ struct CodeEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView, let gutter else { return }
+            if EditorSettings.shared.config.highlightCurrentLine { textView.needsDisplay = true }
             EditorCommands.lastEditor = textView
             let location = textView.selectedRange().location
             let line = gutter.lineNumber(forCharacterIndex: location)
@@ -167,6 +179,65 @@ struct CodeEditor: NSViewRepresentable {
 /// Source text view with µVision's editor context menu.
 final class EditorTextView: NSTextView {
     private var ws: Workspace { Workspace.shared }
+    /// File type of the document (tab and indentation settings).
+    var kind: SourceKind = .other
+    private var config: EditorConfig { EditorSettings.shared.config }
+
+    /// Insert spaces for tabs: spaces up to the next tab stop.
+    override func insertTab(_ sender: Any?) {
+        let type = config.fileType(kind)
+        guard type.insertSpaces else { return super.insertTab(sender) }
+        let text = string as NSString
+        let location = selectedRange().location
+        let lineStart = text.lineRange(for: NSRange(location: location, length: 0)).location
+        var column = 0
+        for c in text.substring(with: NSRange(location: lineStart, length: location - lineStart)) {
+            column = c == "\t" ? (column / type.tabSize + 1) * type.tabSize : column + 1
+        }
+        insertText(String(repeating: " ", count: type.tabSize - column % max(type.tabSize, 1)), replacementRange: selectedRange())
+    }
+
+    /// Auto Indent ▸ Smart: a new line starts with the indentation of the current one.
+    override func insertNewline(_ sender: Any?) {
+        guard config.autoIndent == 1 else { return super.insertNewline(sender) }
+        let text = string as NSString
+        let location = selectedRange().location
+        let line = text.substring(with: text.lineRange(for: NSRange(location: location, length: 0)))
+        let indent = String(line.prefix { $0 == " " || $0 == "\t" })
+        super.insertNewline(sender)
+        if !indent.isEmpty { insertText(indent, replacementRange: selectedRange()) }
+    }
+
+    /// Caret line highlight and right margin (Edit ▸ Configuration).
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        let settings = EditorSettings.shared
+        if settings.config.highlightCurrentLine, selectedRange().length == 0, let layout = layoutManager, let container = textContainer {
+            let text = string as NSString
+            let location = min(selectedRange().location, text.length)
+            var lineRect: NSRect
+            if location == text.length && (text.length == 0 || text.character(at: text.length - 1) == 10) {
+                lineRect = layout.extraLineFragmentRect
+            } else {
+                let glyph = layout.glyphIndexForCharacter(at: location)
+                lineRect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            }
+            _ = container
+            if lineRect.height > 0 {
+                lineRect.origin.x = 0
+                lineRect.size.width = bounds.width
+                lineRect.origin.y += textContainerInset.height
+                settings.color("all", "caretLine", background: true).setFill()
+                lineRect.fill()
+            }
+        }
+        if settings.config.rightMargin == 1 {
+            let x = textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0)
+                + EditorStyle.charWidth(settings.font(for: kind)) * CGFloat(settings.config.rightMarginColumn)
+            settings.color("all", "rightMargin").setFill()
+            NSRect(x: x, y: rect.minY, width: 1, height: rect.height).fill()
+        }
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         // Right-click moves the caret first, like µVision, so line commands act on the clicked line.
@@ -315,26 +386,39 @@ final class EditorScrollView: NSScrollView {
 }
 
 enum EditorStyle {
-    /// µVision's default editor font (Courier New 10 pt at 96 dpi).
-    static let font = NSFont(name: "Courier New", size: 13) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    static var charWidth: CGFloat { ("0" as NSString).size(withAttributes: [.font: font]).width }
+    /// µVision's default editor font (Courier New 10 pt at 96 dpi); Edit ▸ Configuration ▸ Colors & Fonts changes it.
+    static var font: NSFont { EditorSettings.shared.font(for: .c) }
+    static func charWidth(_ font: NSFont) -> CGFloat { ("0" as NSString).size(withAttributes: [.font: font]).width }
+    static var charWidth: CGFloat { charWidth(font) }
 
-    /// Edit ▸ Configuration ▸ Editor defaults: tab size 2 for C/C++ files, 4 for ASM and other files.
-    static func tabSize(for kind: SourceKind) -> Int {
-        switch kind {
-        case .c, .header: return 2
-        default: return 4
-        }
-    }
+    /// Edit ▸ Configuration ▸ Editor: tab size (defaults 2 for C/C++ files, 4 for ASM and other files).
+    static func tabSize(for kind: SourceKind) -> Int { max(1, EditorSettings.shared.config.fileType(kind).tabSize) }
 
     /// No explicit tab stops: every tab advances to the next multiple of the tab size, however many there
     /// are (the default style has only 12 stops and wraps a line after the last one).
     static func paragraph(for kind: SourceKind) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.tabStops = []
-        style.defaultTabInterval = charWidth * CGFloat(tabSize(for: kind))
+        style.defaultTabInterval = charWidth(EditorSettings.shared.font(for: kind)) * CGFloat(tabSize(for: kind))
         style.lineBreakMode = .byClipping
         return style
+    }
+
+    /// Font, colours, selection and invisible characters from Edit ▸ Configuration.
+    static func applySettings(to textView: NSTextView, kind: SourceKind) {
+        let settings = EditorSettings.shared
+        let prefix = EditorSettings.prefix(for: kind)
+        let font = settings.font(for: kind)
+        let paragraph = paragraph(for: kind)
+        textView.font = font
+        textView.defaultParagraphStyle = paragraph
+        textView.typingAttributes = [.font: font, .foregroundColor: settings.color(prefix, "text"), .paragraphStyle: paragraph]
+        textView.backgroundColor = settings.color(prefix, "text", background: true)
+        textView.selectedTextAttributes = [.backgroundColor: settings.color("all", "selection", background: true),
+                                           .foregroundColor: settings.color("all", "selection")]
+        textView.layoutManager?.showsInvisibleCharacters = settings.config.viewWhiteSpace || settings.config.viewEndOfLine
+        textView.enclosingScrollView?.backgroundColor = textView.backgroundColor
+        textView.needsDisplay = true
     }
 }
 
@@ -347,6 +431,8 @@ final class GutterView: NSRulerView {
     var codeLines = Set<Int>()
     var executedLines = Set<Int>()
     var currentLine: Int?
+    /// Edit ▸ Configuration ▸ Editor ▸ Show Line Numbers (per file type).
+    var showLineNumbers = true
     var onToggleBreakpoint: ((Int) -> Void)?
     private var lineStarts: [Int] = [0]
     private var linesValid = false
@@ -481,6 +567,7 @@ final class GutterView: NSRulerView {
                 arrow.lineWidth = 0.8
                 arrow.stroke()
             }
+            guard showLineNumbers else { continue }
             let label = "\(line)" as NSString
             let size = label.size(withAttributes: attributes)
             label.draw(at: NSPoint(x: ruleThickness - size.width - 5, y: y + (h - size.height) / 2), withAttributes: attributes)
@@ -523,38 +610,50 @@ enum SyntaxHighlighter {
         try! NSRegularExpression(pattern: pattern, options: options)
     }
 
-    private static let cRules: [(NSRegularExpression, NSColor)] = [
-        (regex(#"\b(?:\#(cKeywords.joined(separator: "|")))\b"#), keyword),
-        (regex(#"\b(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*\b"#), number),
-        (regex(#"^\s*#\s*\w+"#, [.anchorsMatchLines]), preprocessor),
-        (regex(#""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"#), string),
-        (regex(#"//[^\n]*"#), comment),
-        (regex(#"/\*[\s\S]*?\*/"#), comment),
+    private static let cRules: [(NSRegularExpression, String)] = [
+        (regex(#"\b(?:\#(cKeywords.joined(separator: "|")))\b"#), "keyword"),
+        (regex(#"\b(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*\b"#), "number"),
+        (regex(#"^\s*#\s*\w+"#, [.anchorsMatchLines]), "preprocessor"),
+        (regex(#""(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'"#), "string"),
+        (regex(#"//[^\n]*"#), "comment"),
+        (regex(#"/\*[\s\S]*?\*/"#), "comment"),
     ]
 
-    private static let asmRules: [(NSRegularExpression, NSColor)] = [
-        (regex(#"(?i)\b(?:r(?:1[0-5]|[0-9])|sp|lr|pc|apsr|primask|basepri|faultmask|control|msp|psp)\b"#), register),
-        (regex(#"#?-?\b(?:0[xX][0-9a-fA-F]+|\d+)\b"#), number),
-        (regex(#"^\s*\.\w+|\s\.\w+"#, [.anchorsMatchLines]), directive),
-        (regex(#"(?i)^\s*(?:AREA|EXPORT|IMPORT|ENTRY|END|PROC|ENDP|DCD|DCB|DCW|SPACE|EQU|ALIGN|THUMB|PRESERVE8|IF|ENDIF|ELSE)\b"#, [.anchorsMatchLines]), directive),
-        (regex(#""(?:\\.|[^"\\\n])*""#), string),
-        (regex(#"(?:@|//|;)[^\n]*"#), comment),
-        (regex(#"/\*[\s\S]*?\*/"#), comment),
+    private static let asmRules: [(NSRegularExpression, String)] = [
+        (regex(#"(?i)\b(?:r(?:1[0-5]|[0-9])|sp|lr|pc|apsr|primask|basepri|faultmask|control|msp|psp)\b"#), "register"),
+        (regex(#"#?-?\b(?:0[xX][0-9a-fA-F]+|\d+)\b"#), "number"),
+        (regex(#"^\s*\.\w+|\s\.\w+"#, [.anchorsMatchLines]), "directive"),
+        (regex(#"(?i)^\s*(?:AREA|EXPORT|IMPORT|ENTRY|END|PROC|ENDP|DCD|DCB|DCW|SPACE|EQU|ALIGN|THUMB|PRESERVE8|IF|ENDIF|ELSE)\b"#, [.anchorsMatchLines]), "directive"),
+        (regex(#""(?:\\.|[^"\\\n])*""#), "string"),
+        (regex(#"(?:@|//|;)[^\n]*"#), "comment"),
+        (regex(#"/\*[\s\S]*?\*/"#), "comment"),
     ]
 
     static func apply(to storage: NSTextStorage, kind: SourceKind) {
+        let settings = EditorSettings.shared
+        let prefix = EditorSettings.prefix(for: kind)
+        let type = settings.config.fileType(kind)
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
         storage.beginEditing()
-        storage.setAttributes([.font: EditorStyle.font, .foregroundColor: NSColor.black,
+        storage.setAttributes([.font: settings.font(for: kind), .foregroundColor: settings.color(prefix, "text"),
                                .paragraphStyle: EditorStyle.paragraph(for: kind)], range: full)
-        let rules: [(NSRegularExpression, NSColor)]
-        switch kind {
-        case .c, .header: rules = cRules
-        case .asm: rules = asmRules
-        case .other: rules = []
+        var rules: [(NSRegularExpression, String)] = []
+        if type.syntaxColoring {
+            switch kind {
+            case .c, .header: rules = cRules
+            case .asm: rules = asmRules
+            case .other: rules = []
+            }
+            // User Keywords go before strings and comments so those still win.
+            let words = (settings.config.userKeywords[prefix] ?? []).filter { !$0.isEmpty }
+            if !words.isEmpty, let user = try? NSRegularExpression(pattern: "\\b(?:" + words.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|") + ")\\b") {
+                let at = rules.firstIndex { $0.1 == "string" } ?? rules.count
+                rules.insert((user, "userKeyword"), at: at)
+            }
         }
-        for (regex, color) in rules {
+        for (regex, element) in rules {
+            let color = settings.color(prefix, element)
             for match in regex.matches(in: text, range: full) {
                 storage.addAttribute(.foregroundColor, value: color, range: match.range)
             }
