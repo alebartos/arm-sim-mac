@@ -67,7 +67,7 @@ struct AppCommands: Commands {
                 Button("Cut Current Line") { EditorCommands.cutCurrentLine() }.keyboardShortcut("l", modifiers: [.control])
             }
             Divider()
-            Button("Configuration…") { ws.showOptions = ws.project != nil }
+            Button("Configuration…") {}.disabled(true)   // editor settings dialog: not implemented yet
         }
 
         // MARK: View

@@ -13,9 +13,13 @@ struct OptionsDialog: View {
     @LocalState private var ramBase = ""
     @LocalState private var ramSize = ""
     @LocalState private var xtal = ""
+    @LocalState private var ram2Base = ""
+    @LocalState private var ram2Size = ""
     @LocalState private var showDevices = false
 
-    private let tabs = ["Device", "Target", "Output", "Listing", "User", "C/C++", "Asm", "Linker", "Debug", "Utilities"]
+    private let tabs = ["Device", "Target", "Output", "Listing", "User", "C/C++ (AC6)", "Asm", "Linker", "Debug", "Utilities"]
+    /// Tab to open on (screenshot harness).
+    static var requestedTab: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +55,7 @@ struct OptionsDialog: View {
                 }
             }
             .padding(12)
-            .frame(width: 640, height: 380, alignment: .topLeading)
+            .frame(width: 760, height: 470, alignment: .topLeading)
             .background(Color.white)
             .border(UVColors.border, width: 0.5)
             .padding(.horizontal, 8)
@@ -74,7 +78,10 @@ struct OptionsDialog: View {
         }
         .background(UVColors.chrome)
         .font(.system(size: 11))
-        .onAppear { load(workspace.project?.options ?? TargetOptions()) }
+        .onAppear {
+            load(workspace.project?.options ?? TargetOptions())
+            if let requested = Self.requestedTab { tab = requested }
+        }
         .sheet(isPresented: $showDevices) {
             DeviceSelectionDialog(initial: options.device) { selection in
                 guard let selection else { return }
@@ -92,6 +99,9 @@ struct OptionsDialog: View {
         ramBase = String(format: "0x%08X", o.ramBase)
         ramSize = String(format: "0x%X", o.ramSize)
         xtal = String(format: "%g", o.xtalMHz)
+        let ram2 = (o.ram2 ?? "").split(separator: ":").map(String.init)
+        ram2Base = ram2.count == 2 ? ram2[0] : ""
+        ram2Size = ram2.count == 2 ? ram2[1] : ""
     }
 
     private func parse(_ text: String, _ fallback: UInt32) -> UInt32 {
@@ -107,6 +117,8 @@ struct OptionsDialog: View {
         options.ramBase = parse(ramBase, options.ramBase)
         options.ramSize = parse(ramSize, options.ramSize)
         options.xtalMHz = Double(xtal) ?? options.xtalMHz
+        let ram2Base = ram2Base.trimmingCharacters(in: .whitespaces), ram2Size = ram2Size.trimmingCharacters(in: .whitespaces)
+        options.ram2 = ram2Base.isEmpty || ram2Size.isEmpty ? nil : "\(ram2Base):\(ram2Size)"
         project.options = options
         workspace.project = project
         workspace.saveProject()
@@ -129,52 +141,97 @@ struct OptionsDialog: View {
         }
     }
 
+    /// Target tab laid out as µVision's: device and clock, OS and SVD file on the left, Code Generation on the
+    /// right, then the Read/Only and Read/Write memory area grids (off-chip ROM1-3/RAM1-3, on-chip IROM1-2/IRAM1-2).
     private var targetTab: some View {
         let device = DeviceInfo.forTarget(options)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("\(device.vendor) \(device.name)").bold()
-                Spacer()
-                Text("Xtal (MHz):")
-                TextField("", text: $xtal).frame(width: 70).textFieldStyle(.roundedBorder)
-            }
-            if device.hasFPU {
-                HStack {
-                    Text("Floating Point Hardware:")
-                    Picker("", selection: Binding(get: { options.useFPU == true }, set: { options.useFPU = $0 })) {
-                        Text("Not Used").tag(false)
-                        Text("Use Single Precision").tag(true)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(device.vendor) \(device.name)")
+                    HStack {
+                        Spacer()
+                        Text("Xtal (MHz):")
+                        TextField("", text: $xtal).frame(width: 80).textFieldStyle(.roundedBorder)
                     }
-                    .labelsHidden().frame(width: 180)
+                    HStack {
+                        Text("Operating system:")
+                        Picker("", selection: .constant(0)) { Text("None").tag(0) }.labelsHidden().disabled(true)
+                    }
+                    Text("System Viewer File:")
+                    HStack(spacing: 4) {
+                        TextField("", text: .constant(options.svdPath.map { ($0 as NSString).lastPathComponent } ?? ""))
+                            .textFieldStyle(.roundedBorder).disabled(true)
+                        Button("…") {}.disabled(true)
+                    }
+                    Toggle("Use Custom File", isOn: .constant(false)).disabled(true)
+                }
+                .frame(width: 360, alignment: .leading)
+                GroupBox("Code Generation") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("ARM Compiler:")
+                            Picker("", selection: .constant(0)) { Text("Apple clang (AC6 compatible)").tag(0) }.labelsHidden()
+                        }
+                        if device.hasFPU {
+                            HStack {
+                                Text("Floating Point Hardware:")
+                                Picker("", selection: Binding(get: { options.useFPU == true }, set: { options.useFPU = $0 })) {
+                                    Text("Not Used").tag(false)
+                                    Text("Use Single Precision").tag(true)
+                                }
+                                .labelsHidden()
+                            }
+                        }
+                        HStack(spacing: 14) {
+                            Toggle("Use MicroLIB", isOn: .constant(false)).disabled(true)
+                            Toggle("Big Endian", isOn: .constant(false)).disabled(true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
                 }
             }
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: 10) {
                 GroupBox("Read/Only Memory Areas") {
-                    memoryGrid(name: "IROM1", base: $romBase, size: $romSize, startup: true)
+                    memoryAreas(rows: [("ROM1", nil), ("ROM2", nil), ("ROM3", nil), ("IROM1", ($romBase, $romSize)), ("IROM2", nil)],
+                                lastColumn: "Startup")
                 }
                 GroupBox("Read/Write Memory Areas") {
-                    memoryGrid(name: "IRAM1", base: $ramBase, size: $ramSize, startup: false)
+                    memoryAreas(rows: [("RAM1", nil), ("RAM2", nil), ("RAM3", nil), ("IRAM1", ($ramBase, $ramSize)),
+                                       ("IRAM2", ($ram2Base, $ram2Size))],
+                                lastColumn: "NoInit")
                 }
             }
-            Text("Code and constants are linked into IROM1, the vector table at its start. Data, BSS and the stack go into IRAM1 (stack top = end of IRAM1).")
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func memoryGrid(name: String, base: Binding<String>, size: Binding<String>, startup: Bool) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+    /// One memory-area grid: default | off-chip/on-chip name | Start | Size | Startup or NoInit.
+    /// Rows without bindings (areas ARM Sim does not link into) are shown empty and disabled.
+    private func memoryAreas(rows: [(String, (Binding<String>, Binding<String>)?)], lastColumn: String) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 3) {
             GridRow {
-                Text("default").foregroundColor(.secondary)
-                Text("Start").foregroundColor(.secondary)
-                Text("Size").foregroundColor(.secondary)
-                Text(startup ? "Startup" : "NoInit").foregroundColor(.secondary)
+                Text("default"); Text(""); Text("Start"); Text("Size"); Text(lastColumn)
             }
-            GridRow {
-                HStack(spacing: 2) { Image(systemName: "checkmark.square.fill").foregroundColor(.blue); Text(name) }
-                TextField("", text: base).frame(width: 90).textFieldStyle(.roundedBorder)
-                TextField("", text: size).frame(width: 70).textFieldStyle(.roundedBorder)
-                Image(systemName: startup ? "largecircle.fill.circle" : "square").foregroundColor(.blue)
+            .foregroundColor(.secondary)
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index == 0 { GridRow { Text(""); Text("off-chip").foregroundColor(.secondary) } }
+                if index == 3 { GridRow { Text(""); Text("on-chip").foregroundColor(.secondary) } }
+                GridRow {
+                    let used = row.1.map { !$0.0.wrappedValue.isEmpty } ?? false
+                    Toggle("", isOn: .constant(used)).labelsHidden().disabled(true)
+                    Text(row.0 + ":")
+                    TextField("", text: row.1?.0 ?? .constant("")).frame(width: 90).textFieldStyle(.roundedBorder)
+                        .disabled(row.1 == nil)
+                    TextField("", text: row.1?.1 ?? .constant("")).frame(width: 80).textFieldStyle(.roundedBorder)
+                        .disabled(row.1 == nil)
+                    if lastColumn == "Startup" {
+                        Image(systemName: row.0 == "IROM1" ? "largecircle.fill.circle" : "circle")
+                            .foregroundColor(row.0 == "IROM1" ? .blue : .gray)
+                    } else {
+                        Toggle("", isOn: .constant(false)).labelsHidden().disabled(true)
+                    }
+                }
             }
         }
         .padding(4)

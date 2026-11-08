@@ -357,7 +357,21 @@ extension SmokeTest {
             if let dir = ws.projectDirectory { ws.openDocument(dir.appendingPathComponent(String(file))) }
         }
         if debug { ws.toggleDebugSession() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2)) {
+        // ARMSIM_SHOT_OPTIONS=<tab>: capture the Options for Target dialog on that tab instead.
+        let optionsTab = ProcessInfo.processInfo.environment["ARMSIM_SHOT_OPTIONS"].flatMap(Int.init)
+        if let optionsTab {
+            OptionsDialog.requestedTab = optionsTab
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ws.showOptions = true }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6 : 2.5)) {
+            if optionsTab != nil, let sheet = NSApp.windows.first(where: { $0.sheetParent != nil && $0.isVisible }),
+               let view = sheet.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: output)
+                FileHandle.standardError.write(Data("[shot] \(output.path)\n".utf8))
+                NSApp.terminate(nil)
+                return
+            }
             if ProcessInfo.processInfo.environment["ARMSIM_SHOT_MENUS"] != nil, let menu = NSApp.mainMenu {
                 func dump(_ menu: NSMenu, _ depth: Int) {
                     for item in menu.items {
