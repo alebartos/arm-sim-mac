@@ -387,6 +387,7 @@ struct ViewMenuItems: View {
 
 struct HelpMenuItems: View {
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(Updater.automaticKey) private var automaticUpdates = true
     @ObservedObject var ws = Workspace.shared
 
     var body: some View {
@@ -399,9 +400,8 @@ struct HelpMenuItems: View {
         Button("Contact Support") {
             NSWorkspace.shared.open(StarPrompt.repositoryURL.appendingPathComponent("issues"))
         }
-        Button("Check for Update") {
-            NSWorkspace.shared.open(StarPrompt.repositoryURL.appendingPathComponent("releases"))
-        }
+        Button("Check for Update") { Task { await Updater.shared.check(userInitiated: true) } }
+        Toggle("Check for Updates Automatically", isOn: $automaticUpdates)
         Divider()
         Button("Star ARM Sim on GitHub…") { StarPrompt.openRepository() }
     }

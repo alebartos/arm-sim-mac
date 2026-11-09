@@ -47,6 +47,15 @@ It has been tested mainly on the LPC1768 / LandTiger projects of the Politecnico
 
 The release build is for Apple silicon (arm64). On an Intel Mac, build the app from source.
 
+### Updates
+
+From version 0.3.0 the app updates itself from the GitHub releases. At launch, at most once a day, it
+checks for a newer release. If there is one, it asks whether to install it. It then downloads the DMG,
+checks it against the SHA-256 published by GitHub, replaces the app and relaunches it.
+**Help ▸ Check for Update** checks at once. **Help ▸ Check for Updates Automatically** turns off the
+check at launch. If the app cannot replace itself (for example, the folder is not writable), the
+release page opens so you can install the update by hand.
+
 ## Build from source
 
 ```sh

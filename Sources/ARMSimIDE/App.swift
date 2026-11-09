@@ -59,6 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let i = args.firstIndex(of: "--shot"), i + 2 < args.count {
             SmokeTest.screenshot(project: URL(fileURLWithPath: args[i + 1]), output: URL(fileURLWithPath: args[i + 2]),
                                  debug: args.contains("--debug"))
+        } else if ProcessInfo.processInfo.environment["ARMSIM_UPDATE_SELFTEST"] != nil {
+            Task { await Updater.shared.selfTest() }
         } else if let i = args.firstIndex(of: "--smoke-import"), i + 1 < args.count {
             SmokeTest.importAndDebug(URL(fileURLWithPath: args[i + 1]))
         } else if let i = args.firstIndex(of: "--smoke"), i + 1 < args.count {
@@ -66,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             if EditorSettings.shared.config.openMostRecentProject { Workspace.shared.reopenLastProject() }
             StarPrompt.showAtFirstLaunchIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Updater.shared.checkAtLaunch() }
         }
     }
 
