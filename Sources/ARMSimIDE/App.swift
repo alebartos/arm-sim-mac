@@ -506,6 +506,40 @@ extension SmokeTest {
                                                                f.variables.map(\.name).joined(separator: ",")).utf8))
                 }
             }
+            // ARMSIM_SHOT_TYPE=<text>: type it at the caret, then log the completion list and the parameter tip
+            // (the tip is also saved next to the output as <name>-tip.png).
+            if let typed = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TYPE"],
+               let view = (EditorCommands.textView ?? EditorCommands.lastEditor) as? EditorTextView {
+                view.window?.makeFirstResponder(view)
+                // The debugger moves the caret to the PC: place it again (ARMSIM_SHOT_CARET).
+                if let at = ProcessInfo.processInfo.environment["ARMSIM_SHOT_CARET"]?.split(separator: ":").compactMap({ Int($0) }), at.count == 2 {
+                    let text = view.string as NSString
+                    var start = 0
+                    for _ in 1..<max(at[0], 1) { start = NSMaxRange(text.lineRange(for: NSRange(location: start, length: 0))) }
+                    view.setSelectedRange(NSRange(location: min(start + at[1] - 1, text.length), length: 0))
+                }
+                let original = view.string
+                let caret = view.selectedRange()
+                for ch in typed { view.insertText(String(ch), replacementRange: view.selectedRange()) }
+                // The typed text is never saved: the document is restored after logging.
+                defer {
+                    view.hideParameterTip()
+                    view.string = original
+                    view.setSelectedRange(caret)
+                    view.undoManager?.removeAllActions()
+                    if let doc = ws.activeDocument { doc.text = original; doc.isDirty = false }
+                }
+                var selected = 0
+                let words = view.completions(forPartialWordRange: view.rangeForUserCompletion, indexOfSelectedItem: &selected) ?? []
+                FileHandle.standardError.write(Data("[shot] completions (\(words.count)): \(words.prefix(40).joined(separator: " "))\n".utf8))
+                FileHandle.standardError.write(Data("[shot] tip: \(view.parameterTipText ?? "-")\n".utf8))
+                if view.parameterTipText != nil, let tip = view.window?.childWindows?.first(where: { $0 is ParameterTipWindow }),
+                   let content = tip.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                    content.cacheDisplay(in: content.bounds, to: rep)
+                    let url = output.deletingPathExtension().appendingPathExtension("tip.png")
+                    try? rep.representation(using: .png, properties: [:])?.write(to: url)
+                }
+            }
             if let tv = EditorCommands.lastEditor, let sv = tv.enclosingScrollView {
                 FileHandle.standardError.write(Data("[shot] clip \(sv.contentView.frame) bounds \(sv.contentView.bounds) tv \(tv.frame) inset \(tv.textContainerInset) origin \(tv.textContainerOrigin) ruler \(sv.verticalRulerView?.frame ?? .zero)\n".utf8))
             }

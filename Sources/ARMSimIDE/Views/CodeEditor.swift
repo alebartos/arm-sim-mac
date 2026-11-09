@@ -342,6 +342,28 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
     override func didChangeText() {
         super.didChangeText()
         let config = self.config
+        updateParameterTip()
+        if !completing, kind == .c || kind == .header, selectedRange().length == 0, selectedRange().location > 0 {
+            let text = string as NSString
+            let caret = selectedRange().location
+            let last = text.character(at: caret - 1)
+            // Struct / Class Members: the list opens right after `.` or `->`.
+            if config.completionMembers, last == 0x2E || (last == 0x3E && caret > 1 && text.character(at: caret - 2) == 0x2D),
+               let product = ws.lastProduct,
+               CodeCompletion.members(text: text, accessAt: last == 0x2E ? caret - 1 : caret - 2, product: product,
+                                      path: ws.activeDocument?.path) != nil {
+                DispatchQueue.main.async { [weak self] in self?.complete(nil) }
+                return
+            }
+            // Function Parameters: the signature tip opens after `name(`.
+            if config.completionParameters, last == 0x28, let name = CodeCompletion.identifier(text, before: caret - 1),
+               !SyntaxHighlighter.cKeywords.contains(name),
+               let signature = CodeCompletion.signature(of: name, text: text, product: ws.lastProduct) {
+                parameterTip = (caret - 1, signature)
+                updateParameterTip()
+                return
+            }
+        }
         guard config.completionSymbols, !completing, kind != .other, selectedRange().length == 0 else { return }
         let word = partialWord()
         // Open the list once, when the word reaches the threshold; it then filters itself while typing.
@@ -373,6 +395,17 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
     /// identifiers of this file.
     override func completions(forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>) -> [String]? {
         let prefix = (string as NSString).substring(with: charRange)
+        // After `.` / `->`: only the members of that struct / union.
+        if kind == .c || kind == .header, let op = accessOperator(before: charRange.location) {
+            guard config.completionMembers, let product = ws.lastProduct,
+                  let members = CodeCompletion.members(text: string as NSString, accessAt: op, product: product,
+                                                       path: ws.activeDocument?.path) else { return nil }
+            let lower = prefix.lowercased()
+            let result = members.filter { $0.lowercased().hasPrefix(lower) && $0 != prefix }
+                .sorted { $0.lowercased() < $1.lowercased() }
+            index.pointee = result.isEmpty ? -1 : 0
+            return result.isEmpty ? nil : result
+        }
         guard !prefix.isEmpty else { return nil }
         var words = Set<String>()
         if kind == .asm {
@@ -397,6 +430,67 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
             .sorted { $0.lowercased() < $1.lowercased() }
         index.pointee = result.isEmpty ? -1 : 0
         return result.isEmpty ? nil : Array(result.prefix(300))
+    }
+
+    /// Index of the `.` (or of the `-` of `->`) right before `location`, spaces skipped.
+    private func accessOperator(before location: Int) -> Int? {
+        let text = string as NSString
+        var i = location
+        while i > 0, text.character(at: i - 1) == 0x20 || text.character(at: i - 1) == 0x09 { i -= 1 }
+        guard i > 0 else { return nil }
+        if text.character(at: i - 1) == 0x2E { return i - 1 }
+        if i > 1, text.character(at: i - 1) == 0x3E, text.character(at: i - 2) == 0x2D { return i - 2 }
+        return nil
+    }
+
+    // MARK: Function parameters tip (Text Completion ▸ Function Parameters)
+
+    /// The `(` the tip belongs to and the called function's signature.
+    private var parameterTip: (paren: Int, signature: CodeCompletion.Signature)?
+    private var tipWindow: ParameterTipWindow?
+
+    /// Shows the tip with the current argument in bold while the caret is inside the call; hides it otherwise.
+    func updateParameterTip() {
+        guard let tip = parameterTip else { return }
+        let text = string as NSString
+        guard selectedRange().length == 0, tip.paren < text.length, text.character(at: tip.paren) == 0x28,
+              let call = CodeCompletion.openCall(text, at: selectedRange().location), call.paren == tip.paren,
+              let window else { return hideParameterTip() }
+        let rect = firstRect(forCharacterRange: NSRange(location: tip.paren, length: 1), actualRange: nil)
+        let panel = tipWindow ?? ParameterTipWindow()
+        tipWindow = panel
+        panel.show(tip.signature, argument: call.argument, font: EditorSettings.shared.font(for: kind),
+                   below: rect, parent: window)
+    }
+
+    var parameterTipText: String? { parameterTip == nil ? nil : tipWindow?.label.stringValue }
+
+    func hideParameterTip() {
+        parameterTip = nil
+        if let panel = tipWindow {
+            panel.parent?.removeChildWindow(panel)
+            panel.orderOut(nil)
+        }
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        if parameterTip != nil, !stillSelecting { updateParameterTip() }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if parameterTip != nil { return hideParameterTip() }
+        super.cancelOperation(sender)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        hideParameterTip()
+        return super.resignFirstResponder()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { hideParameterTip() }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     /// Insert spaces for tabs: spaces up to the next tab stop.
@@ -947,5 +1041,56 @@ enum SyntaxHighlighter {
             }
         }
         storage.endEditing()
+    }
+}
+
+/// Tool tip below a function call with its signature, the current argument in bold (µVision's
+/// Function Parameters completion). A child window of the editor's window, never key.
+final class ParameterTipWindow: NSPanel {
+    let label = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10), styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered, defer: true)
+        isFloatingPanel = true
+        hidesOnDeactivate = true
+        hasShadow = true
+        backgroundColor = .clear
+        isOpaque = false
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor(calibratedRed: 1, green: 1, blue: 0.88, alpha: 1).cgColor
+        box.layer?.borderColor = NSColor(calibratedWhite: 0.45, alpha: 1).cgColor
+        box.layer?.borderWidth = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.textColor = .black
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -4),
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -2),
+        ])
+        contentView = box
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    func show(_ signature: CodeCompletion.Signature, argument: Int, font: NSFont, below anchor: NSRect, parent: NSWindow) {
+        let regular = NSFont.systemFont(ofSize: max(font.pointSize - 1, 10))
+        let bold = NSFont.boldSystemFont(ofSize: regular.pointSize)
+        let text = NSMutableAttributedString(string: signature.head + "(", attributes: [.font: regular])
+        for (i, parameter) in signature.parameters.enumerated() {
+            if i > 0 { text.append(NSAttributedString(string: ", ", attributes: [.font: regular])) }
+            text.append(NSAttributedString(string: parameter, attributes: [.font: i == argument ? bold : regular]))
+        }
+        text.append(NSAttributedString(string: ")", attributes: [.font: regular]))
+        label.attributedStringValue = text
+        let size = label.fittingSize
+        setContentSize(NSSize(width: ceil(size.width) + 8, height: ceil(size.height) + 4))
+        setFrameOrigin(NSPoint(x: anchor.minX, y: anchor.minY - frame.height - 2))
+        if parent != self.parent { parent.addChildWindow(self, ordered: .above) }
+        orderFront(nil)
     }
 }

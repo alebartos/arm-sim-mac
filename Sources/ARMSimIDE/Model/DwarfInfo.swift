@@ -193,6 +193,18 @@ final class DwarfInfo {
         function(containing: pc)?.visibleVariables(at: pc) ?? []
     }
 
+    /// A typedef, or else a struct / union / enum, with that name (any object file).
+    func type(named name: String) -> DwarfType? {
+        var tagged: DwarfType?
+        for table in tables {
+            for t in table.types.values where t.name == name {
+                if t.kind == .typedef { return t }
+                if tagged == nil, t.kind == .structure || t.kind == .union || t.kind == .enumeration { tagged = t }
+            }
+        }
+        return tagged
+    }
+
     /// Locals/parameters of the function at `pc` first, then globals.
     func lookup(_ name: String, pc: UInt32) -> DwarfVariable? {
         locals(at: pc).last { $0.name == name } ?? globalVariables.first { $0.name == name }

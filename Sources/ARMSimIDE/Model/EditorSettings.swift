@@ -54,6 +54,9 @@ struct EditorConfig: Codable, Equatable {
     // Text Completion tab: symbols list after `completionCharacters` typed characters.
     var completionSymbols = true
     var completionCharacters = 3
+    /// Members list after `.` / `->` and the parameter tip after `(` (DWARF of the last build).
+    var completionMembers = true
+    var completionParameters = true
 
     // Other tab
     var openMostRecentProject = true

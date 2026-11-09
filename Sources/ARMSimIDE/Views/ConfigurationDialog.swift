@@ -392,11 +392,8 @@ struct ConfigurationDialog: View {
             VStack(spacing: 10) {
                 GroupBox("Show Code Completion List for") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Group {
-                            Toggle("Struct / Class Members", isOn: .constant(false))
-                            Toggle("Function Parameters", isOn: .constant(false))
-                        }
-                        .disabled(true).help("Not available yet")
+                        Toggle("Struct / Class Members", isOn: $config.completionMembers)
+                        Toggle("Function Parameters", isOn: $config.completionParameters)
                         HStack(spacing: 4) {
                             Toggle("Symbols after", isOn: $config.completionSymbols)
                             TextField("", value: $config.completionCharacters, format: .number).textFieldStyle(.squareBorder).frame(width: 30)
