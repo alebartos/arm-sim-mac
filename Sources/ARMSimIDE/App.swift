@@ -445,6 +445,12 @@ extension SmokeTest {
         if let address = ProcessInfo.processInfo.environment["ARMSIM_SHOT_MEMORY"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { UserDefaults.standard.set(address, forKey: "memoryAddress") }
         }
+        // ARMSIM_SHOT_STEPS=<n> (with --debug): n x Step Over (F10) before the capture.
+        if let steps = ProcessInfo.processInfo.environment["ARMSIM_SHOT_STEPS"].flatMap(Int.init) {
+            for i in 0..<steps {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.5 + Double(i) * 0.15) { ws.debugger.stepOver() }
+            }
+        }
         // ARMSIM_SHOT_TABS=<left>,<bottom right>: select those dock tabs (e.g. 2,1 = Symbols + Watch 1).
         if let tabs = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TABS"]?.split(separator: ",").compactMap({ Int($0) }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 5.5 : 2)) {
@@ -539,6 +545,20 @@ extension SmokeTest {
                     let url = output.deletingPathExtension().appendingPathExtension("tip.png")
                     try? rep.representation(using: .png, properties: [:])?.write(to: url)
                 }
+            }
+            // ARMSIM_SHOT_TIPS=1: log the AppKit tool tips of the main window (toolbar buttons).
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_TIPS"] != nil, let root = NSApp.windows.first(where: { $0.isVisible })?.contentView {
+                var tips: [String] = []
+                func walk(_ v: NSView) { if let t = v.toolTip { tips.append(t) }; v.subviews.forEach(walk) }
+                walk(root)
+                FileHandle.standardError.write(Data("[shot] tooltips (\(tips.count)): \(tips.joined(separator: " | "))\n".utf8))
+            }
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_STEPS"] != nil, let doc = ws.activeDocument {
+                let executed = Set(ws.debugger.executedAddresses.compactMap { a -> Int? in
+                    guard let l = ws.lastProduct?.debugInfo.lineByAddress[a], l.path == doc.path else { return nil }
+                    return l.line
+                }).sorted()
+                FileHandle.standardError.write(Data("[shot] pc line \(ws.debugger.currentLocation?.line ?? 0), doc \(doc.path), executed addrs \(ws.debugger.executedAddresses.count), executed lines \(executed)\n".utf8))
             }
             if let tv = EditorCommands.lastEditor, let sv = tv.enclosingScrollView {
                 FileHandle.standardError.write(Data("[shot] clip \(sv.contentView.frame) bounds \(sv.contentView.bounds) tv \(tv.frame) inset \(tv.textContainerInset) origin \(tv.textContainerOrigin) ruler \(sv.verticalRulerView?.frame ?? .zero)\n".utf8))

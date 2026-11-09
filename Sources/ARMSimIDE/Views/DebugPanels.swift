@@ -453,7 +453,7 @@ struct ToolboxWindow: View {
                 Button { debugger.execute(command: button.command, workspace: Workspace.shared) } label: {
                     Text(button.label).frame(maxWidth: .infinity)
                 }
-                .help(button.command)
+                .toolTip(button.command)
                 .disabled(!debugger.isActive)
             }
         }

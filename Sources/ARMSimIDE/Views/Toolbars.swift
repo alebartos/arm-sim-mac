@@ -140,7 +140,7 @@ struct FindBox: View {
         .frame(height: 20)
         .background(Color.white)
         .overlay(Rectangle().stroke(UVColors.border))
-        .help("Find text in the active editor")
+        .toolTip("Find text in the active editor")
     }
 }
 

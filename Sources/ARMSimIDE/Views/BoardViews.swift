@@ -82,7 +82,7 @@ struct GPIOWindow: View {
                             .frame(width: 13)
                     }
                     .buttonStyle(.plain)
-                    .help("Bit \(bit)")
+                    .toolTip("Bit \(bit)")
                     // Pins row: only pins of the package; FIOnPIN: absent pins greyed, as µVision.
                     .opacity(offset == nil && !present ? 0 : 1)
                     .disabled(!present && (offset == nil || offset == 0x14))
@@ -230,7 +230,7 @@ struct LandTigerWindow: View {
             .frame(width: 24, height: 22)
             .background(RoundedRectangle(cornerRadius: 4).fill(held ? Color(white: 0.55) : Color(white: 0.85)))
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.black.opacity(0.35)))
-            .help("\(direction) (P1.\(direction.rawValue))")
+            .toolTip("\(direction) (P1.\(direction.rawValue))")
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in if !held { debugger.setJoystick(direction, pressed: true) } }
                 .onEnded { _ in debugger.setJoystick(direction, pressed: false) })

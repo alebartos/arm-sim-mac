@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum UVColors {
@@ -98,7 +99,7 @@ struct ToolButton: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.35)
-        .help(help)
+        .toolTip(help)
         .onHover { hovering = $0 }
     }
 }
@@ -125,7 +126,7 @@ struct ToolMenuButton<Content: View>: View {
         .overlay(RoundedRectangle(cornerRadius: 3).stroke(hovering ? Color.blue.opacity(0.35) : .clear))
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.35)
-        .help(help)
+        .toolTip(help)
         .onHover { hovering = $0 }
     }
 }
@@ -156,5 +157,29 @@ struct ToolbarGrip: View {
             }
         }
         .padding(.horizontal, 3)
+    }
+}
+
+/// AppKit tool tip over a view (also on disabled buttons, as in µVision). SwiftUI's `.help` loses its
+/// timer whenever the view is redrawn (hover highlight, debugger updates), so toolbar tips never showed.
+private final class ToolTipNSView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks go to the view below
+}
+
+private struct ToolTipArea: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> NSView {
+        let view = ToolTipNSView()
+        view.toolTip = text
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {
+        if view.toolTip != text { view.toolTip = text }
+    }
+}
+
+extension View {
+    func toolTip(_ text: String) -> some View {
+        overlay(text.isEmpty ? nil : ToolTipArea(text: text))
     }
 }
