@@ -58,6 +58,9 @@ struct EditorConfig: Codable, Equatable {
     var completionMembers = true
     var completionParameters = true
 
+    // Shortcut Keys tab: "Menu:Item" -> "⌃⇧F9" ("" = shortcut removed); built-in keys otherwise.
+    var shortcuts: [String: String] = [:]
+
     // Other tab
     var openMostRecentProject = true
 

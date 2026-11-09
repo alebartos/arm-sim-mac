@@ -17,6 +17,8 @@ struct ConfigurationDialog: View {
     // Shortcut Keys
     @LocalState private var commands: [(name: String, key: String)] = []
     @LocalState private var selectedCommand: Int?
+    @LocalState private var shortcutMessage = ""
+    @LocalState private var captureMonitor: Any?
     // Text Completion
     @LocalState private var templateType = 1
     @LocalState private var selectedTemplate: UUID?
@@ -59,7 +61,7 @@ struct ConfigurationDialog: View {
             .padding(.horizontal, 8)
             HStack {
                 Spacer().frame(width: 240)
-                Button("OK") { EditorSettings.shared.config = config; dismiss() }.keyboardShortcut(.defaultAction).frame(width: 100)
+                Button("OK") { stopCapture(""); EditorSettings.shared.config = config; ShortcutKeys.relabel(); dismiss() }.keyboardShortcut(.defaultAction).frame(width: 100)
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).frame(width: 100)
                 Spacer()
                 Button("Help") {}.disabled(true).frame(width: 100)
@@ -72,6 +74,7 @@ struct ConfigurationDialog: View {
             if let t = Self.requestedTab { tab = t; Self.requestedTab = nil }
             if commands.isEmpty { commands = Self.menuCommands() }
         }
+        .onDisappear { stopCapture("") }
     }
 
     // MARK: Editor
@@ -316,37 +319,42 @@ struct ConfigurationDialog: View {
     // MARK: Shortcut Keys
 
     /// "Menu:Item" commands of the menu bar with their key equivalents.
-    static func menuCommands() -> [(name: String, key: String)] {
-        var result: [(String, String)] = []
-        func walk(_ menu: NSMenu, _ path: String) {
-            menu.delegate?.menuNeedsUpdate?(menu)
-            for item in menu.items where !item.isSeparatorItem && !item.title.isEmpty {
-                let name = path.isEmpty ? item.title : path + ":" + item.title
-                if let sub = item.submenu {
-                    walk(sub, path.isEmpty ? item.title : name)
-                } else if !path.isEmpty {
-                    result.append((name.replacingOccurrences(of: "…", with: "..."), shortcut(item)))
-                }
-            }
-        }
-        if let menu = NSApp.mainMenu {
-            for top in menu.items.dropFirst() { if let sub = top.submenu { walk(sub, top.title) } }
-        }
-        return result.sorted { $0.0 < $1.0 }
+    static func menuCommands() -> [(name: String, key: String)] { ShortcutKeys.commands() }
+
+    /// Shortcut of a command with the dialog's (not yet applied) changes.
+    private func assignedKey(_ name: String) -> String {
+        config.shortcuts[name] ?? ShortcutKeys.originalKey(name)
     }
 
-    private static func shortcut(_ item: NSMenuItem) -> String {
-        guard !item.keyEquivalent.isEmpty else { return "" }
-        var s = ""
-        let m = item.keyEquivalentModifierMask
-        if m.contains(.control) { s += "⌃" }
-        if m.contains(.option) { s += "⌥" }
-        if m.contains(.shift) { s += "⇧" }
-        if m.contains(.command) { s += "⌘" }
-        let special: [String: String] = ["\u{F704}": "F1", "\u{F705}": "F2", "\u{F706}": "F3", "\u{F707}": "F4", "\u{F708}": "F5",
-                                         "\u{F709}": "F6", "\u{F70A}": "F7", "\u{F70B}": "F8", "\u{F70C}": "F9", "\u{F70D}": "F10",
-                                         "\u{F70E}": "F11", "\u{F70F}": "F12", "\r": "↩", "\t": "⇥", "\u{1B}": "⎋"]
-        return s + (special[item.keyEquivalent] ?? item.keyEquivalent.uppercased())
+    /// Create Shortcut: the next key combination pressed (Esc alone cancels).
+    private func startCapture() {
+        guard let i = selectedCommand else { return }
+        shortcutMessage = "Press the new shortcut (Esc to cancel)"
+        ConfigurationCapture.active = true
+        captureMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53, event.modifierFlags.intersection([.control, .option, .shift, .command]).isEmpty {
+                stopCapture("")
+                return nil
+            }
+            guard let key = ShortcutKeys.spec(event) else {
+                shortcutMessage = "Use ⌃, ⌥ or ⌘ with a key, or a function key"
+                return nil
+            }
+            let name = commands[i].name
+            // A key belongs to one command: it is taken from the command that had it.
+            let owner = commands.map(\.name).first { $0 != name && assignedKey($0) == key }
+            if let owner { config.shortcuts[owner] = "" }
+            config.shortcuts[name] = key == ShortcutKeys.originalKey(name) && owner == nil ? nil : key
+            stopCapture(owner.map { "Removed from \($0)" } ?? "")
+            return nil
+        }
+    }
+
+    private func stopCapture(_ message: String) {
+        if let monitor = captureMonitor { NSEvent.removeMonitor(monitor) }
+        captureMonitor = nil
+        ConfigurationCapture.active = false
+        shortcutMessage = message
     }
 
     private var shortcutsTab: some View {
@@ -369,11 +377,19 @@ struct ConfigurationDialog: View {
                 }
                 GroupBox("Assigned Shortcuts:") {
                     VStack(spacing: 8) {
-                        Text(selectedCommand.map { commands[$0].key } ?? "").frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+                        Text(selectedCommand.map { assignedKey(commands[$0].name) } ?? "")
+                            .padding(2).frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
                             .background(Color.white).overlay(Rectangle().stroke(UVColors.border, lineWidth: 1))
-                        Button("Create Shortcut") {}.disabled(true)
-                        Button("Remove Shortcut") {}.disabled(true)
-                        Button("Reset All Shortcuts") {}.disabled(true)
+                        Text(shortcutMessage).font(.system(size: 11)).foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
+                        Button("Create Shortcut") { startCapture() }
+                            .disabled(selectedCommand == nil || captureMonitor != nil)
+                        Button("Remove Shortcut") {
+                            if let i = selectedCommand { config.shortcuts[commands[i].name] = ""; shortcutMessage = "" }
+                        }
+                        .disabled(selectedCommand.map { assignedKey(commands[$0].name).isEmpty } ?? true)
+                        Button("Reset All Shortcuts") { config.shortcuts = [:]; shortcutMessage = "" }
+                            .disabled(config.shortcuts.isEmpty)
                     }
                     .padding(2)
                 }

@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Needed when launched with `swift run` (no .app bundle).
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        ShortcutKeys.install()
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--shot"), i + 2 < args.count {
             SmokeTest.screenshot(project: URL(fileURLWithPath: args[i + 1]), output: URL(fileURLWithPath: args[i + 2]),
@@ -449,6 +450,38 @@ extension SmokeTest {
         if let steps = ProcessInfo.processInfo.environment["ARMSIM_SHOT_STEPS"].flatMap(Int.init) {
             for i in 0..<steps {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.5 + Double(i) * 0.15) { ws.debugger.stepOver() }
+            }
+        }
+        // ARMSIM_SHOT_SHORTCUTS=1 (with --debug; =control: no change, F10 steps): Debug:Step Over moved to ⌃⌥J; synthetic ⌃⌥J must step, F10 must not.
+        if ProcessInfo.processInfo.environment["ARMSIM_SHOT_SHORTCUTS"] != nil {
+            func say(_ s: String) { FileHandle.standardError.write(Data("[shot] \(s)\n".utf8)) }
+            var savedShortcuts: [String: String] = [:]
+            func press(_ chars: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags) {
+                guard let window = NSApp.windows.first(where: { $0.isVisible }),
+                      let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                                               windowNumber: window.windowNumber, context: nil, characters: chars,
+                                               charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) else { return }
+                NSApp.postEvent(e, atStart: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                _ = ShortcutKeys.commands()   // records the built-in keys
+                savedShortcuts = EditorSettings.shared.config.shortcuts
+                if ProcessInfo.processInfo.environment["ARMSIM_SHOT_SHORTCUTS"] != "control" {
+                    EditorSettings.shared.config.shortcuts["Debug:Step Over"] = "⌃⌥J"
+                }
+                ShortcutKeys.relabel()
+                say("start line \(ws.debugger.currentLocation?.line ?? 0)")
+                press("\u{F70D}", 109, [.function])   // F10: built-in key, now unassigned
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
+                say("after F10 line \(ws.debugger.currentLocation?.line ?? 0)")
+                press("j", 38, [.control, .option])
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                say("after ⌃⌥J line \(ws.debugger.currentLocation?.line ?? 0)")
+                let item = ShortcutKeys.commands().first { $0.name == "Debug:Step Over" }
+                say("Step Over shown as \(item?.key ?? "?"), F10 owner \(ShortcutKeys.command(withKey: "F10") ?? "none")")
+                EditorSettings.shared.config.shortcuts = savedShortcuts
             }
         }
         // ARMSIM_SHOT_TABS=<left>,<bottom right>: select those dock tabs (e.g. 2,1 = Symbols + Watch 1).
