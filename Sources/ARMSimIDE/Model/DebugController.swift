@@ -343,10 +343,13 @@ final class DebugController: ObservableObject {
             var reason: String?
             var steps = 0
             repeat {
+                let before = sim.cpu.pc
                 reason = controller.singleStep(sim)
                 steps += 1
                 let line = info.lineByAddress[sim.cpu.pc]
                 if reason != nil || (line != nil && line != startLine) { break }
+                // A branch to itself (`stop B stop`) never leaves the line: one step is one instruction there.
+                if sim.cpu.pc == before { break }
             } while steps < 1_000_000 && !controller.stopRequested
             return reason
         }
@@ -366,8 +369,10 @@ final class DebugController: ObservableObject {
                                                           limit: .max, ignoreFirstBreakpoint: true) {
                         return reason
                     }
-                } else if let reason = controller.singleStep(sim) {
-                    return reason
+                } else {
+                    let before = sim.cpu.pc
+                    if let reason = controller.singleStep(sim) { return reason }
+                    if sim.cpu.pc == before { break }   // branch to itself
                 }
                 steps += 1
                 if instructionLevel || startLine == nil { break }
@@ -458,6 +463,11 @@ final class DebugController: ObservableObject {
             executed &+= chunk
             if reason != .instructionLimit { return describe(reason, pc: pc, sim: sim) }
             if let condition, condition(sim) { return nil }
+            if condition == nil, sim.cpu.isStuckForever() {
+                let name = product?.image.symbol(containing: sim.cpu.pc)?.name
+                return String(format: "*** Program ended: endless loop at 0x%08X%@ (no interrupt or event can leave it)",
+                              sim.cpu.pc, name.map { " (\($0))" } ?? "")
+            }
             if Date().timeIntervalSince(lastPublish) > 0.1 && ((product?.options.periodicUpdate ?? true) || updateRequested) {
                 updateRequested = false
                 lastPublish = Date()

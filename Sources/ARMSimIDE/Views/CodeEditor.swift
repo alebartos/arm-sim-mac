@@ -103,7 +103,8 @@ struct CodeEditor: NSViewRepresentable {
         gutter.needsDisplay = true
         if let line = revealLine, coordinator.lastRevealToken != revealToken {
             coordinator.lastRevealToken = revealToken
-            DispatchQueue.main.async { coordinator.scroll(toLine: line, select: currentLine != line) }
+            // The caret follows the shown line, the PC line too (µVision): caret line highlight and L:C move with steps.
+            DispatchQueue.main.async { coordinator.scroll(toLine: line, select: true) }
         }
         _ = textView
     }

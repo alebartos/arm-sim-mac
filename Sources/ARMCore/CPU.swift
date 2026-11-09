@@ -329,6 +329,24 @@ public final class CPU {
         deviceHorizon = horizon
     }
 
+    /// The core sits on a branch to itself (`B .`, `B.W .`, `BX Rm` to itself) and nothing can ever take it
+    /// out: no exception pending, no external interrupt enabled, no SysTick interrupt or debug script signal
+    /// to come. The program has ended for good (µVision keeps running; the debugger stops here instead).
+    public func isStuckForever() -> Bool {
+        let pc = r[15]
+        guard itState == 0, let hw1 = try? memory.read(pc, size: 2) else { return false }
+        var selfBranch = hw1 == 0xE7FE
+        if !selfBranch, hw1 & 0xFF87 == 0x4700 {
+            let target = r[Int((hw1 >> 3) & 0xF)]
+            selfBranch = target & 1 == 1 && target & ~1 == pc
+        }
+        if !selfBranch, hw1 == 0xF7FF, let hw2 = try? memory.read(pc &+ 2, size: 2) { selfBranch = hw2 == 0xBFFE }
+        guard selfBranch, system.highestPending() == nil, !system.pending.contains(true) else { return false }
+        // Peripheral events only matter through enabled interrupts; debug script signals may still act.
+        guard !system.enabled.dropFirst(16).contains(true) else { return false }
+        return system.clocksUntilSysTickInterrupt() == nil && nextExternalEvent == .max
+    }
+
     /// A peripheral register was written: its next event may have moved.
     public func devicesChanged() { deviceHorizon = 0 }
 
