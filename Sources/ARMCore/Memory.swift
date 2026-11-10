@@ -98,8 +98,24 @@ public final class MemoryMap {
     /// The two most recently used regions (typically code and data), not reference counted: `regions` owns them.
     private unowned(unsafe) var hitA: MemoryRegion = MemoryMap.none
     private unowned(unsafe) var hitB: MemoryRegion = MemoryMap.none
-    /// Region of the last instruction fetch (code), apart from the data accesses.
-    private unowned(unsafe) var hitCode: MemoryRegion = MemoryMap.none
+    /// Plain-value windows on the last RAM/ROM regions used for data and for instruction fetch: the hot path
+    /// touches no class reference at all (even unowned(unsafe) loads were retained and released).
+    private struct Window {
+        var base: UInt32 = 0
+        var size: UInt32 = 0
+        var bytes: UnsafeMutablePointer<UInt8>? = nil
+        var writable = false
+        @inline(__always) func pointer(_ address: UInt32, _ length: Int) -> UnsafeMutablePointer<UInt8>? {
+            let offset = address &- base
+            return UInt64(offset) + UInt64(length) <= UInt64(size) ? bytes.map { $0 + Int(offset) } : nil
+        }
+    }
+    private var dataWindow = Window()
+    private var codeWindow = Window()
+
+    private static func window(_ r: MemoryRegion) -> Window {
+        r.isMemory ? Window(base: r.base, size: r.size, bytes: r.storage, writable: !r.isROM) : Window()
+    }
     private static let none = MemoryRegion(name: "", base: 0, size: 0, kind: .rom)
     /// Called after every successful CPU write (address, size); nil when nobody listens (Logic Analyzer).
     public var onWrite: ((UInt32, Int) -> Void)?
@@ -177,9 +193,9 @@ public final class MemoryMap {
 
     /// Little-endian read of 1, 2 or 4 bytes.
     public func read(_ address: UInt32, size: Int) throws -> UInt32 {
-        // Fast path: RAM/ROM of the last region used, through the unowned(unsafe) reference (no retain/release).
-        if hitA.isMemory && hitA.contains(address, size) {
-            let p = UnsafeRawPointer(hitA.storage + Int(address &- hitA.base))
+        // Fast path: RAM/ROM of the last data region used.
+        if let q = dataWindow.pointer(address, size) {
+            let p = UnsafeRawPointer(q)
             switch size {
             case 4: return p.loadUnaligned(as: UInt32.self)
             case 2: return UInt32(p.loadUnaligned(as: UInt16.self))
@@ -192,16 +208,17 @@ public final class MemoryMap {
     /// Instruction fetch (halfword): own region cache, so code in ROM and data in RAM do not evict each other.
     @inline(__always)
     public func fetch16(_ address: UInt32) throws -> UInt32 {
-        if hitCode.isMemory && hitCode.contains(address, 2) {
-            return UInt32((UnsafeRawPointer(hitCode.storage + Int(address &- hitCode.base))).loadUnaligned(as: UInt16.self))
+        if let q = codeWindow.pointer(address, 2) {
+            return UInt32(UnsafeRawPointer(q).loadUnaligned(as: UInt16.self))
         }
         let value = try slowRead(address, size: 2)
-        if hitA.isMemory && hitA.contains(address, 2) { hitCode = hitA }
+        if let r = region(containing: address), r.isMemory { codeWindow = Self.window(r) }
         return value
     }
 
     private func slowRead(_ address: UInt32, size: Int) throws -> UInt32 {
-        unowned(unsafe) let r = try find(address, size, write: false)
+        let r = try find(address, size, write: false)
+        if r.isMemory { dataWindow = Self.window(r) }
         let offset = Int(address &- r.base)
         if r.isMemory {
             let p = UnsafeRawPointer(r.storage + offset)
@@ -217,8 +234,8 @@ public final class MemoryMap {
 
     /// Little-endian write of 1, 2 or 4 bytes. Writes to ROM raise a bus error.
     public func write(_ address: UInt32, size: Int, value: UInt32) throws {
-        if hitA.isMemory && !hitA.isROM && hitA.contains(address, size) && onWrite == nil {
-            let p = UnsafeMutableRawPointer(hitA.storage + Int(address &- hitA.base))
+        if dataWindow.writable, onWrite == nil, let q = dataWindow.pointer(address, size) {
+            let p = UnsafeMutableRawPointer(q)
             switch size {
             case 4: p.storeBytes(of: value, as: UInt32.self)
             case 2: p.storeBytes(of: UInt16(truncatingIfNeeded: value), as: UInt16.self)
@@ -230,7 +247,8 @@ public final class MemoryMap {
     }
 
     private func slowWrite(_ address: UInt32, size: Int, value: UInt32) throws {
-        unowned(unsafe) let r = try find(address, size, write: true)
+        let r = try find(address, size, write: true)
+        if r.isMemory { dataWindow = Self.window(r) }
         let offset = Int(address &- r.base)
         if r.isMemory {
             if r.isROM { throw BusError(address: address, size: size, isWrite: true) }

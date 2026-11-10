@@ -248,8 +248,9 @@ public final class CPU {
     /// that resuming from a breakpoint works.
     public func run(maxInstructions: UInt64 = .max) -> StopReason {
         var executed: UInt64 = 0
+        let checkBreakpoints = !breakpoints.isEmpty   // the set does not change during a run
         while executed < maxInstructions {
-            if executed > 0 && !breakpoints.isEmpty && breakpoints.contains(r[15]) {
+            if checkBreakpoints && executed > 0 && breakpoints.contains(r[15]) {
                 return .breakpoint(address: r[15])
             }
             let address = r[15]
@@ -385,7 +386,7 @@ public final class CPU {
         let inIT = itState & 0xF != 0
         let isITInstruction = !is32 && hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0
         // Register backup for faults (an in-place copy: `let saved = r` would allocate on every write).
-        for i in 0..<16 { savedRegs[i] = r[i] }
+        savedRegs.base.update(from: r.base, count: 16)
 
         do {
             if !inIT || conditionPassed(UInt32(itState >> 4)) {
