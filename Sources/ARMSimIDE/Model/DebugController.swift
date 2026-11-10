@@ -45,13 +45,13 @@ struct CPUSnapshot: Equatable {
 
 final class DebugController: ObservableObject {
     @Published private(set) var isActive = false
-    @Published private(set) var isRunning = false
-    @Published private(set) var snapshot = CPUSnapshot()
-    @Published private(set) var previous = CPUSnapshot()
-    @Published private(set) var currentLocation: SourceLocation?
+    @Published internal(set) var isRunning = false
+    @Published internal(set) var snapshot = CPUSnapshot()
+    @Published internal(set) var previous = CPUSnapshot()
+    @Published internal(set) var currentLocation: SourceLocation?
     @Published var commandLog: [String] = []
     @Published var printfOutput = ""
-    @Published private(set) var revision = 0
+    @Published internal(set) var revision = 0
     @Published var watchExpressions: [String] = []
     /// Toolbox buttons defined by debug scripts (DEFINE BUTTON).
     @Published private(set) var toolboxButtons: [ToolboxButton] = []
@@ -157,10 +157,14 @@ final class DebugController: ObservableObject {
     /// Breakpoints by address (resolved from source lines + set in disassembly/command window).
     private(set) var breakpointAddresses = Set<UInt32>()
 
-    private let queue = DispatchQueue(label: "armsim.simulation", qos: .userInitiated)
+    let queue = DispatchQueue(label: "armsim.simulation", qos: .userInitiated)
+    /// GDB server session (Options ▸ Debug ▸ Use: GDB Server) instead of the simulator (`RemoteDebug.swift`).
+    var remote: GDBRemote?
+    var remoteBreakpoints = Set<UInt32>()
+    var remoteSettings: GDBServerSettings?
     private let stopLock = NSLock()
     private var _stopRequested = false
-    private var stopRequested: Bool {
+    var stopRequested: Bool {
         get { stopLock.lock(); defer { stopLock.unlock() }; return _stopRequested }
         set { stopLock.lock(); _stopRequested = newValue; stopLock.unlock() }
     }
@@ -211,7 +215,7 @@ final class DebugController: ObservableObject {
 
     // MARK: Session
 
-    func start(product: BuildProduct, breakpoints: Set<UInt32>, initFile: URL? = nil) {
+    func start(product: BuildProduct, breakpoints: Set<UInt32>, initFile: URL? = nil, gdbServer: GDBServerSettings? = nil) {
         self.product = product
         self.initFile = initFile
         stopRequested = false
@@ -228,6 +232,11 @@ final class DebugController: ObservableObject {
         // As µVision: the full image path, then one "WS 1, `expr" per Watch 1 entry restored from the project.
         log("Load \"\(product.axfURL.path)\"")
         for expression in watchExpressions { log("WS 1, `\(expression)") }
+        if let gdbServer, gdbServer.enabled {
+            isRunning = true
+            queue.async { [weak self] in self?.startRemoteOnQueue(gdbServer) }
+            return
+        }
         queue.async { [weak self] in
             guard let self else { return }
             self.makeSimulator()
@@ -247,6 +256,10 @@ final class DebugController: ObservableObject {
 
     func stopSession() {
         stopRequested = true
+        if remote != nil {
+            remote?.interrupt()
+            queue.sync { stopRemoteSession() }
+        }
         queue.sync { scripts?.killAllSignals(); scripts = nil }
         isActive = false
         isRunning = false
@@ -301,7 +314,7 @@ final class DebugController: ObservableObject {
         scripts = engine
     }
 
-    private func appendOutput(_ text: String) {
+    func appendOutput(_ text: String) {
         outputLock.lock()
         pendingOutput += text
         outputLock.unlock()
@@ -311,6 +324,7 @@ final class DebugController: ObservableObject {
 
     func setBreakpoints(_ addresses: Set<UInt32>) {
         breakpointAddresses = addresses
+        if remote != nil, !isRunning { queue.async { [weak self] in try? self?.syncRemoteBreakpoints() } }
     }
 
     // MARK: Execution control (all CPU access happens on `queue`)
@@ -319,8 +333,14 @@ final class DebugController: ObservableObject {
         guard isActive, !isRunning else { return }
         LogicAnalyzer.shared.reset()
         queue.async { [weak self] in
-            self?.resetOnQueue()
-            self?.publish(stopMessage: nil)
+            guard let self else { return }
+            if self.remote != nil {
+                self.resetRemoteOnQueue()
+                self.publishRemote(stopMessage: nil)
+                return
+            }
+            self.resetOnQueue()
+            self.publish(stopMessage: nil)
         }
     }
 
@@ -344,16 +364,24 @@ final class DebugController: ObservableObject {
 
     func run() {
         guard isActive, !isRunning else { return }
+        if remote != nil { return execute { c in Self.remoteResult { try c.runRemote() } } }
         execute { $0.runOnQueue(until: nil, limit: .max) }
     }
 
     func stop() {
         stopRequested = true
+        remote?.interrupt()
+    }
+
+    /// A remote operation's stop message, or its error as one.
+    static func remoteResult(_ body: () throws -> String?) -> String? {
+        do { return try body() } catch { return "*** GDB server: \(error)" }
     }
 
     /// Step one source line (or one instruction when there is no line information).
     func stepInto(instructionLevel: Bool = false) {
         guard isActive, !isRunning else { return }
+        if remote != nil { return execute { c in Self.remoteResult { try c.stepRemote(over: false, instructionLevel: instructionLevel) } } }
         execute { controller in
             guard let sim = controller.simulator, let info = controller.product?.debugInfo else { return nil }
             let startLine = info.lineByAddress[sim.cpu.pc]
@@ -378,6 +406,7 @@ final class DebugController: ObservableObject {
     /// Step over calls (BL/BLX run until they return).
     func stepOver(instructionLevel: Bool = false) {
         guard isActive, !isRunning else { return }
+        if remote != nil { return execute { c in Self.remoteResult { try c.stepRemote(over: true, instructionLevel: instructionLevel) } } }
         execute { controller in
             guard let sim = controller.simulator, let info = controller.product?.debugInfo else { return nil }
             let startLine = info.lineByAddress[sim.cpu.pc]
@@ -406,6 +435,7 @@ final class DebugController: ObservableObject {
     /// Run until the current function returns.
     func stepOut() {
         guard isActive, !isRunning else { return }
+        if remote != nil { return execute { c in Self.remoteResult { try c.stepOutRemote() } } }
         execute { controller in
             guard let sim = controller.simulator else { return nil }
             let target = sim.cpu.lr & ~1
@@ -417,6 +447,7 @@ final class DebugController: ObservableObject {
 
     func runTo(address: UInt32) {
         guard isActive, !isRunning else { return }
+        if remote != nil { return execute { c in Self.remoteResult { try c.runRemote(toAddress: address) } } }
         execute { $0.runOnQueue(until: { $0.cpu.pc == address }, limit: .max) }
     }
 
@@ -427,7 +458,7 @@ final class DebugController: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             let message = body(self)
-            self.publish(stopMessage: message)
+            if self.remote != nil { self.publishRemote(stopMessage: message) } else { self.publish(stopMessage: message) }
         }
     }
 
@@ -623,17 +654,29 @@ final class DebugController: ObservableObject {
     /// Peripheral / core register read for the peripheral dialogs: goes through the device's `peek`
     /// (no read side effects), unlike `readMemory`, which shows MMIO as unreadable. 0 while running.
     func readRegister(_ address: UInt32, size: Int = 4) -> UInt32 {
+        if remote != nil {
+            return readRemoteMemory(address, count: size).enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element ?? 0) << (8 * $1.offset) }
+        }
         guard let sim = simulator, !isRunning else { return 0 }
         return queue.sync { sim.memory.peekRegister(address, size: size) ?? 0 }
     }
 
     func readMemory(_ address: UInt32, count: Int) -> [UInt8?] {
+        if remote != nil { return readRemoteMemory(address, count: count) }
         // While running the simulation queue is busy: never block the UI on it.
         guard let sim = simulator, !isRunning else { return [UInt8?](repeating: nil, count: count) }
         return queue.sync { sim.memory.peek(address, count: count) }
     }
 
     func writeRegister(_ index: Int, _ value: UInt32) {
+        if let gdb = remote, !isRunning {
+            let names = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc"]
+            queue.async { [weak self] in
+                try? gdb.writeRegister(names[index], value)
+                self?.publishRemote(stopMessage: nil)
+            }
+            return
+        }
         guard let sim = simulator, !isRunning else { return }
         queue.async { [weak self] in
             if index == 15 { sim.cpu.pc = value } else if index == 13 { sim.cpu.sp = value } else { sim.cpu.r[index] = value }
@@ -642,6 +685,13 @@ final class DebugController: ObservableObject {
     }
 
     func writeMemory(_ address: UInt32, size: Int, value: UInt32) {
+        if let gdb = remote, !isRunning {
+            queue.async { [weak self] in
+                try? gdb.writeMemory(address, (0..<size).map { UInt8(truncatingIfNeeded: value >> (8 * UInt32($0))) })
+                self?.publishRemote(stopMessage: nil)
+            }
+            return
+        }
         guard let sim = simulator, !isRunning else { return }
         queue.async { [weak self] in
             try? sim.memory.write(address, size: size, value: value)
@@ -701,7 +751,7 @@ final class DebugController: ObservableObject {
         commandLog.append(line)
     }
 
-    private func appendLog(_ line: String) {
+    func appendLog(_ line: String) {
         DispatchQueue.main.async { self.commandLog.append(line) }
     }
 

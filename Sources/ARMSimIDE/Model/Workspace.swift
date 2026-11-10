@@ -815,7 +815,8 @@ final class Workspace: ObservableObject {
         if let path = project?.options.debugIniFile, !path.isEmpty, debugIniURL == nil {
             buildLog.append(LogLine(text: "*** warning: initialization file '\(path)' not found", kind: .warning))
         }
-        debugger.start(product: product, breakpoints: resolvedBreakpointAddresses(), initFile: debugIniURL)
+        debugger.start(product: product, breakpoints: resolvedBreakpointAddresses(), initFile: debugIniURL,
+                       gdbServer: GDBServerSettings.load(projectPath: projectURL?.path))
     }
 
     func startDebugWithKeilImage() {

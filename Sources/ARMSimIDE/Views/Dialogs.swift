@@ -7,6 +7,8 @@ struct OptionsDialog: View {
     @ObservedObject var workspace: Workspace
     @Environment(\.dismiss) private var dismiss
     @LocalState private var options = TargetOptions()
+    /// Debug tab, right side: the GDB server used instead of the simulator (per project, user defaults).
+    @LocalState private var gdb = GDBServerSettings()
     @LocalState private var tab = 1
     @LocalState private var romBase = ""
     @LocalState private var romSize = ""
@@ -83,6 +85,7 @@ struct OptionsDialog: View {
         .font(.system(size: 11))
         .onAppear {
             load(workspace.project?.options ?? TargetOptions())
+            gdb = GDBServerSettings.load(projectPath: workspace.projectURL?.path)
             if let requested = Self.requestedTab { tab = requested }
         }
         .sheet(isPresented: $showDevices) {
@@ -114,6 +117,7 @@ struct OptionsDialog: View {
     }
 
     private func commit() {
+        gdb.save(projectPath: workspace.projectURL?.path)
         guard var project = workspace.project else { return }
         options.romBase = parse(romBase, options.romBase)
         options.romSize = parse(romSize, options.romSize)
@@ -554,7 +558,7 @@ struct OptionsDialog: View {
                 // Simulator (the only debugger in ARM Sim).
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
-                        radio(true, "Use Simulator")
+                        radio(!gdb.enabled, "Use Simulator").onTapGesture { gdb.enabled = false }
                         Spacer()
                         Button("Settings") {}.disabled(true)
                     }
@@ -600,15 +604,26 @@ struct OptionsDialog: View {
                 }
                 .frame(maxWidth: .infinity)
                 Divider()
-                // Hardware debugger: not available.
+                // Target debugging through a GDB server (OpenOCD / pyOCD / J-Link GDB Server / QEMU).
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
-                        radio(false, "Use:")
-                        Picker("", selection: .constant(0)) { Text("ULINK2/ME Cortex Debugger").tag(0) }.labelsHidden()
-                        Button("Settings") {}
+                        radio(gdb.enabled, "Use:").onTapGesture { gdb.enabled = true }
+                        Picker("", selection: .constant(0)) { Text("GDB Server (OpenOCD, pyOCD, QEMU)").tag(0) }.labelsHidden()
                     }
-                    Spacer().frame(height: 20)
+                    HStack(spacing: 4) {
+                        Text("Host:")
+                        TextField("", text: $gdb.host).textFieldStyle(.roundedBorder)
+                        Text("Port:")
+                        TextField("", value: $gdb.port, format: .number.grouping(.never)).textFieldStyle(.roundedBorder).frame(width: 60)
+                    }
+                    Picker("Load:", selection: $gdb.load) {
+                        ForEach(GDBServerSettings.Load.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    Text("Start the server first, e.g. openocd -f interface/cmsis-dap.cfg -f target/lpc17xx.cfg")
+                        .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                     Divider()
+                    // µVision's driver options below are not used by the GDB server.
+                    Group {
                     HStack {
                         Toggle("Load Application at Startup", isOn: .constant(true))
                         Spacer()
@@ -634,8 +649,9 @@ struct OptionsDialog: View {
                         }
                     }
                     Toggle("Warn if outdated Executable is loaded", isOn: .constant(true))
+                    }
+                    .disabled(true)
                 }
-                .disabled(true)
                 .frame(maxWidth: .infinity)
             }
             Button("Manage Component Viewer Description Files …") {}.disabled(true)
