@@ -258,6 +258,29 @@ extension SmokeTest {
             say("uvoptx saved with \(ws.disabledBreakpoints.count) disabled breakpoints")
             exit(0)
         }
+        // ARMSIM_SMOKE_GROUPS=1: edit groups and files (two "New Group", rename the first project group, add and
+        // remove files), save, reopen the .uvprojx and print what it holds.
+        if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_GROUPS"] != nil, let project = ws.project, let first = project.groups.first,
+           let dir = ws.projectDirectory {
+            ws.addGroup()
+            ws.addGroup()
+            ws.addGroup()   // three: the second save already sees two nodes named "New Group"
+            ws.renameGroup(first.id, to: first.name + "_renamed")
+            if let added = ws.project?.groups.last {
+                ws.addFiles([dir.appendingPathComponent("extra.c")], toGroup: added.id)
+                ws.renameGroup(added.id, to: "Extra")
+            }
+            if let second = ws.project?.groups.dropFirst().first, let file = second.files.first {
+                ws.removeFile(file, fromGroup: second.id)
+            }
+            let expected = ws.project.map { $0.groups.map { "\($0.name)\($0.files.map { ($0 as NSString).lastPathComponent })" } } ?? []
+            ws.open(projectURL: url)
+            let reloaded = ws.project.map { $0.groups.map { "\($0.name)\($0.files.map { ($0 as NSString).lastPathComponent })" } } ?? []
+            say("groups expected: \(expected)")
+            say("groups reloaded: \(reloaded)")
+            say(expected == reloaded ? "groups round trip OK" : "groups round trip MISMATCH")
+            exit(0)
+        }
         if ProcessInfo.processInfo.environment["ARMSIM_SMOKE_NOBP"] != nil { ws.removeAllBreakpoints() }
         if let ini = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_INI"] { ws.project?.options.debugIniFile = ini }
         if useKeil { ws.startDebugWithKeilImage() } else { ws.toggleDebugSession() }

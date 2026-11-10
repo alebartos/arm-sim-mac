@@ -399,12 +399,40 @@ final class Workspace: ObservableObject {
             writeUVIfChanged(xml, to: url)
             return
         }
-        var pool: [String: XMLElement] = [:]
-        for (i, g) in oldGroups.enumerated() { pool[currentNames[i]] = g }
+        // Each existing node is reused once: by name (groups may share a name), else, for a renamed group, the node
+        // at the same position whose name is no longer wanted (keeps its GroupOption).
+        var used = Set<ObjectIdentifier>()
+        var created = Set<ObjectIdentifier>()
+        func take(_ g: XMLElement) -> XMLElement { used.insert(ObjectIdentifier(g)); return g }
         groupsNode.setChildren(nil)
+        let depth = max(Array(sequence(first: groupsNode as XMLNode, next: { $0.parent })).count - 2, 0)
+        /// Children are collected and set at once (whitespace text added with addChild is lost on output); a new
+        /// node goes on its own line, indented as µVision does (two spaces per level).
+        var groupChildren: [XMLNode] = []
+        func append(_ node: XMLElement, to list: inout [XMLNode], level: Int) {
+            if created.contains(ObjectIdentifier(node)) {
+                Self.indent(node, level: level)
+                list.append(XMLNode.text(withStringValue: "\n" + String(repeating: "  ", count: level)) as! XMLNode)
+            }
+            list.append(node)
+        }
         for (gi, group) in project.groups.enumerated() {
-            let g = pool[group.name] ?? Self.uvElement("Group", [XMLElement(name: "GroupName", stringValue: group.name)])
+            let g: XMLElement
+            if let i = oldGroups.indices.first(where: { currentNames[$0] == group.name && !used.contains(ObjectIdentifier(oldGroups[$0])) }) {
+                g = take(oldGroups[i])
+            } else if gi < oldGroups.count, !wantedNames.contains(currentNames[gi]), !used.contains(ObjectIdentifier(oldGroups[gi])) {
+                g = take(oldGroups[gi])
+                g.elements(forName: "GroupName").first?.stringValue = group.name
+            } else {
+                g = Self.uvElement("Group", [XMLElement(name: "GroupName", stringValue: group.name)])
+                created.insert(ObjectIdentifier(g))
+            }
             g.detach()
+            // An empty group without <Files> (e.g. µVision's ::CMSIS component group) stays without it.
+            if wantedFiles[gi].isEmpty && g.elements(forName: "Files").isEmpty {
+                append(g, to: &groupChildren, level: depth + 1)
+                continue
+            }
             let filesNode = g.elements(forName: "Files").first ?? {
                 let e = XMLElement(name: "Files")
                 g.addChild(e)
@@ -413,26 +441,104 @@ final class Workspace: ObservableObject {
             var filePool: [String: XMLElement] = [:]
             for f in filesNode.elements(forName: "File") { filePool[f.elements(forName: "FilePath").first?.stringValue ?? ""] = f }
             filesNode.setChildren(nil)
+            var fileChildren: [XMLNode] = []
             for path in wantedFiles[gi] {
-                let f = filePool[path] ?? Self.uvElement("File", [
-                    XMLElement(name: "FileName", stringValue: (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent),
-                    XMLElement(name: "FileType", stringValue: Self.uvFileType(path)),
-                    XMLElement(name: "FilePath", stringValue: path),
-                ])
+                let f = filePool[path] ?? {
+                    let f = Self.uvElement("File", [
+                        XMLElement(name: "FileName", stringValue: (path.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent),
+                        XMLElement(name: "FileType", stringValue: Self.uvFileType(path)),
+                        XMLElement(name: "FilePath", stringValue: path),
+                    ])
+                    created.insert(ObjectIdentifier(f))
+                    return f
+                }()
                 f.detach()
-                filesNode.addChild(f)
+                append(f, to: &fileChildren, level: depth + 3)
             }
+            if fileChildren.contains(where: { $0.kind == .text }) {
+                fileChildren.append(XMLNode.text(withStringValue: "\n" + String(repeating: "  ", count: depth + 2)) as! XMLNode)
+            }
+            filesNode.setChildren(fileChildren)
             if g.elements(forName: "Files").isEmpty { g.addChild(filesNode) }
-            groupsNode.addChild(g)
+            append(g, to: &groupChildren, level: depth + 1)
         }
+        if groupChildren.contains(where: { $0.kind == .text }) {
+            groupChildren.append(XMLNode.text(withStringValue: "\n" + String(repeating: "  ", count: depth)) as! XMLNode)
+        }
+        groupsNode.setChildren(groupChildren)
         writeUVIfChanged(xml, to: url)
     }
 
     private func writeUVIfChanged(_ xml: XMLDocument, to url: URL) {
         let data = xml.xmlData(options: [.nodePreserveAll])
         guard data != uvSavedData else { return }
-        try? data.write(to: url)
+        try? Self.keilXMLText(xml, replacing: url).write(to: url, atomically: true, encoding: .utf8)
         uvSavedData = data
+    }
+
+    /// Lays out the element children of a newly created `element` one per line, indented by two spaces per level.
+    static func indent(_ element: XMLElement, level: Int) {
+        let elements = (element.children ?? []).compactMap { $0 as? XMLElement }
+        guard !elements.isEmpty else { return }
+        let inner = "\n" + String(repeating: "  ", count: level + 1)
+        var laidOut: [XMLNode] = []
+        for e in elements {
+            e.detach()
+            laidOut.append(XMLNode.text(withStringValue: inner) as! XMLNode)
+            laidOut.append(e)
+            indent(e, level: level + 1)
+        }
+        laidOut.append(XMLNode.text(withStringValue: "\n" + String(repeating: "  ", count: level)) as! XMLNode)
+        element.setChildren(laidOut)
+    }
+
+    /// Same text as µVision writes: the file's XML declaration on its own line and <a></a> for empty elements,
+    /// except those µVision itself wrote self-closed in this file (e.g. <Breakpoint/> of a target without
+    /// breakpoints in the .uvoptx).
+    static func keilXMLText(_ xml: XMLDocument, replacing url: URL) -> String {
+        var text = xml.xmlString(options: [.nodePreserveAll])
+        let original = try? String(contentsOf: url, encoding: .utf8)
+        if let empty = try? NSRegularExpression(pattern: #"<([A-Za-z_][\w.-]*)/>"#) {
+            let source = original ?? ""
+            let selfClosed = Set(empty.matches(in: source, range: NSRange(source.startIndex..., in: source))
+                .compactMap { Range($0.range(at: 1), in: source).map { String(source[$0]) } })
+            for match in empty.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+                guard let whole = Range(match.range, in: text), let name = Range(match.range(at: 1), in: text) else { continue }
+                let tag = String(text[name])
+                if !selfClosed.contains(tag) { text.replaceSubrange(whole, with: "<\(tag)></\(tag)>") }
+            }
+        }
+        if let original, let firstLine = original.components(separatedBy: "\n").first,
+           firstLine.hasPrefix("<?xml"), let end = text.range(of: "?>") {
+            text = firstLine.trimmingCharacters(in: .newlines) + "\n" + text[end.upperBound...].drop { $0 == "\n" || $0 == "\r" }
+        }
+        if !text.hasSuffix("\n") { text += "\n" }
+        return splitAdjacentTags(text)
+    }
+
+    /// Puts tags written next to each other ("</Group><Group>", "<Files><File>") on their own lines, indented
+    /// two spaces per level as µVision does; a leaf element ("<a>text</a>", "<a></a>") stays on one line.
+    static func splitAdjacentTags(_ text: String) -> String {
+        guard text.contains("><"),
+              let unit = try? NSRegularExpression(pattern: #"<([\w.:-]+)(?:\s[^>]*)?>[^<]*</\1>|</[^>]+>|<[^>]+>"#) else { return text }
+        var out: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            guard line.contains("><") else { out.append(line); continue }
+            let ns = line as NSString
+            var indent = line.prefix { $0 == " " }.count
+            let body = ns.substring(from: indent)
+            let units = unit.matches(in: body, range: NSRange(location: 0, length: (body as NSString).length))
+                .map { (body as NSString).substring(with: $0.range) }
+            // Only lines made entirely of tags are split.
+            guard units.count > 1, units.joined() == body else { out.append(line); continue }
+            func isOpening(_ u: String) -> Bool { !u.hasPrefix("</") && !u.hasSuffix("/>") && !u.dropFirst().contains("<") }
+            for (i, u) in units.enumerated() {
+                if i > 0 && u.hasPrefix("</") { indent = max(indent - 2, 0) }
+                out.append(String(repeating: " ", count: indent) + u)
+                if isOpening(u) { indent += 2 }
+            }
+        }
+        return out.joined(separator: "\n")
     }
 
     static func uvElement(_ name: String, _ children: [XMLNode]) -> XMLElement {
@@ -938,26 +1044,7 @@ final class Workspace: ObservableObject {
            let item = (try? option.nodes(forXPath: "MemoryWindow1/Mm/ItemText"))?.first {
             item.stringValue = memory
         }
-        // Same text as µVision writes: its XML declaration and <a></a> for empty elements, except those µVision
-        // itself wrote self-closed in this file (e.g. <Breakpoint/> of a target without breakpoints).
-        var text = xml.xmlString(options: [.nodePreserveAll])
-        let original = try? String(contentsOf: url, encoding: .utf8)
-        if let empty = try? NSRegularExpression(pattern: #"<([A-Za-z_][\w.-]*)/>"#) {
-            let source = original ?? ""
-            let selfClosed = Set(empty.matches(in: source, range: NSRange(source.startIndex..., in: source))
-                .compactMap { Range($0.range(at: 1), in: source).map { String(source[$0]) } })
-            for match in empty.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
-                guard let whole = Range(match.range, in: text), let name = Range(match.range(at: 1), in: text) else { continue }
-                let tag = String(text[name])
-                if !selfClosed.contains(tag) { text.replaceSubrange(whole, with: "<\(tag)></\(tag)>") }
-            }
-        }
-        if let original, let firstLine = original.components(separatedBy: "\n").first,
-           firstLine.hasPrefix("<?xml"), let end = text.range(of: "?>") {
-            text = firstLine.trimmingCharacters(in: .newlines) + "\n" + text[end.upperBound...].drop { $0 == "\n" || $0 == "\r" }
-        }
-        if !text.hasSuffix("\n") { text += "\n" }
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+        try? Self.keilXMLText(xml, replacing: url).write(to: url, atomically: true, encoding: .utf8)
         uvOptionsLoaded = (breakpoints, disabled, watch, window2, memory, ini)
     }
 
