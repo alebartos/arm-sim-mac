@@ -36,7 +36,12 @@ struct DisassemblyPanel: View {
                     proxy.scrollTo(Int(debugger.snapshot.r[15]) * 4 + 3, anchor: .center)
                 }
             }
+            .onChange(of: debugger.disassemblyFocus) { focus in
+                guard let focus else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { proxy.scrollTo(Int(focus) * 4 + 3, anchor: .center) }
+            }
             .onChange(of: debugger.snapshot.r[15]) { newPC in
+                debugger.disassemblyFocus = nil
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     proxy.scrollTo(Int(newPC) * 4 + 3, anchor: .center)
                 }
@@ -64,6 +69,11 @@ struct DisassemblyPanel: View {
                     if breakpoints.contains(line.address) {
                         Circle().fill(Color.red).frame(width: 10, height: 10)
                     }
+                    if line.address == debugger.disassemblyFocus && line.address != pc {
+                        // Logic Analyzer ▸ Jump to Code: cyan marker, as µVision's code position marker.
+                        Image(systemName: "arrowtriangle.right.fill").font(.system(size: 11))
+                            .foregroundColor(Color(red: 0, green: 0.75, blue: 0.85))
+                    }
                     if line.address == pc && debugger.isActive {
                         Image(systemName: "arrowtriangle.right.fill").font(.system(size: 11))
                             .foregroundColor(Color(red: 1, green: 0.8, blue: 0))
@@ -86,7 +96,8 @@ struct DisassemblyPanel: View {
                 Spacer(minLength: 0)
             }
             .frame(height: 15)
-            .background(line.address == pc && debugger.isActive ? Color(red: 1, green: 1, blue: 0) : .clear)
+            .background(line.address == pc && debugger.isActive ? Color(red: 1, green: 1, blue: 0)
+                        : line.address == debugger.disassemblyFocus ? Color(red: 0.75, green: 0.95, blue: 1) : .clear)
             .onTapGesture(count: 2) { workspace.toggleAddressBreakpoint(line.address) }
         }
     }

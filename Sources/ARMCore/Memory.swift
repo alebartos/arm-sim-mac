@@ -76,6 +76,8 @@ public final class MemoryRegion {
 public final class MemoryMap {
     public private(set) var regions: [MemoryRegion] = []
     private var lastHit: MemoryRegion?
+    /// Called after every successful CPU write (address, size); nil when nobody listens (Logic Analyzer).
+    public var onWrite: ((UInt32, Int) -> Void)?
 
     public init() {}
 
@@ -172,6 +174,7 @@ public final class MemoryMap {
                 for i in 0..<size { p[offset + i] = UInt8(truncatingIfNeeded: value >> (8 * i)) }
             }
         }
+        onWrite?(address, size)
     }
 
     /// Programs raw bytes into RAM or ROM (like a flash download). MMIO is refused.

@@ -113,8 +113,10 @@ struct LogicAnalyzerView: View {
                 smallButton("Next", enabled: !traces.isEmpty) { jumpTransition(traces, forward: true, range: range) }
             }
             group("Jump to") {
-                smallButton("Code", enabled: false) {}
-                smallButton("Trace", enabled: false) {}
+                smallButton("Code", enabled: codeAddress(traces) != nil) {
+                    if let address = codeAddress(traces) { jumpToCode(address) }
+                }
+                smallButton("Trace", enabled: false) {}   // no instruction trace recording
             }
             Divider().frame(height: 30)
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 0) {
@@ -405,6 +407,27 @@ struct LogicAnalyzerView: View {
             analyzer.updateSignal(c)
         }
         rangeUndo = [:]
+    }
+
+    /// Jump to Code: the instruction that made the last change, at or before the cursor, of the selected (or
+    /// first) signal.
+    private func codeAddress(_ traces: [LATrace]) -> UInt32? {
+        guard let cursor = cursorCycle, let trace = traces.first(where: { $0.id == selectedSignal }) ?? traces.first,
+              let first = trace.cycles.first, cursor >= first, trace.pcs.count == trace.cycles.count else { return nil }
+        return trace.pcs[trace.index(atOrBefore: cursor)]
+    }
+
+    /// Shows the instruction in the Disassembly window and its source line in the editor.
+    private func jumpToCode(_ address: UInt32) {
+        debugger.disassemblyFocus = address
+        WindowLayout.shared.showDisassembly = true
+        WindowLayout.shared.topTab = 0
+        if let info = Workspace.shared.lastProduct?.debugInfo {
+            // The source line of the instruction, or of the closest instruction before it.
+            let location = info.lineByAddress[address]
+                ?? info.lineByAddress.filter { $0.key <= address && address &- $0.key < 64 }.max { $0.key < $1.key }?.value
+            if let location { Workspace.shared.reveal(location) }
+        }
     }
 
     /// Move the cursor to the previous / next value change of the selected (or first) signal.

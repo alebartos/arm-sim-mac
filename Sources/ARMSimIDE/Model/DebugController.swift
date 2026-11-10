@@ -179,11 +179,31 @@ final class DebugController: ObservableObject {
         }
     }
 
-    /// Feed the Logic Analyzer (simulation queue).
+    /// Feed the Logic Analyzer (simulation queue). While it has signals, every CPU write also samples, so a
+    /// change is recorded at its exact cycle with the address of the writing instruction (Jump to Code).
     private func sampleAnalyzer(_ sim: Simulator) {
-        guard sampling else { return }
-        LogicAnalyzer.shared.sample(cycle: sim.cpu.cycles, read: { sim.memory.peekRegister($0, size: $1) }, registers: sim.cpu.r.values)
+        let on = sampling
+        if on != (writeHookOwner == ObjectIdentifier(sim)) {
+            if on {
+                sim.memory.onWrite = { [unowned sim] _, _ in
+                    LogicAnalyzer.shared.sample(cycle: sim.cpu.cycles, pc: sim.cpu.instructionAddress,
+                                                read: { sim.memory.peekRegister($0, size: $1) }, registers: { sim.cpu.r.values })
+                }
+                writeHookOwner = ObjectIdentifier(sim)
+            } else {
+                sim.memory.onWrite = nil
+                writeHookOwner = nil
+            }
+        }
+        guard on else { return }
+        LogicAnalyzer.shared.sample(cycle: sim.cpu.cycles, pc: sim.cpu.instructionAddress,
+                                    read: { sim.memory.peekRegister($0, size: $1) }, registers: { sim.cpu.r.values })
     }
+    /// Simulator whose memory has the Logic Analyzer write hook (simulation queue only).
+    private var writeHookOwner: ObjectIdentifier?
+
+    /// Instruction to show in the Disassembly window (Logic Analyzer ▸ Jump to Code), nil = follow the PC.
+    @Published var disassemblyFocus: UInt32?
     private let outputLock = NSLock()
 
     /// Core clock for times shown and script delays: LPC17xx CCLK from its PLL setup, else the Xtal setting.

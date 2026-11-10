@@ -437,7 +437,8 @@ extension SmokeTest {
         }
         // ARMSIM_SHOT_LA=<signal>: open the Logic Analyzer tab with that signal (with --debug).
         if let signal = ProcessInfo.processInfo.environment["ARMSIM_SHOT_LA"] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
+            // Before ARMSIM_SHOT_STEPS (4.5 s), so the steps are recorded.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
                 LogicAnalyzer.shared.addSignal(signal)
                 WindowLayout.shared.openLogicAnalyzer()
             }
@@ -449,7 +450,7 @@ extension SmokeTest {
         // ARMSIM_SHOT_STEPS=<n> (with --debug): n x Step Over (F10) before the capture.
         if let steps = ProcessInfo.processInfo.environment["ARMSIM_SHOT_STEPS"].flatMap(Int.init) {
             for i in 0..<steps {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4.5 + Double(i) * 0.15) { ws.debugger.stepOver() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.5 + Double(i) * 0.4) { ws.debugger.stepOver() }
             }
         }
         // ARMSIM_SHOT_SHORTCUTS=1 (with --debug; =control: no change, F10 steps): Debug:Step Over moved to ⌃⌥J; synthetic ⌃⌥J must step, F10 must not.
@@ -608,6 +609,16 @@ extension SmokeTest {
                 func walk(_ v: NSView) { if let t = v.toolTip { tips.append(t) }; v.subviews.forEach(walk) }
                 walk(root)
                 FileHandle.standardError.write(Data("[shot] tooltips (\(tips.count)): \(tips.joined(separator: " | "))\n".utf8))
+            }
+            // With ARMSIM_SHOT_LA: the recorded changes with the writing instruction and its source line.
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_LA"] != nil {
+                for t in LogicAnalyzer.shared.traces {
+                    let changes = zip(t.cycles, t.pcs).map { c, pc -> String in
+                        let line = ws.lastProduct?.debugInfo.lineByAddress[pc].map { "\(($0.path as NSString).lastPathComponent):\($0.line)" } ?? "?"
+                        return String(format: "cycle %llu pc 0x%08X (%@)", c, pc, line)
+                    }
+                    FileHandle.standardError.write(Data("[shot] LA \(t.config.expression): \(changes)\n".utf8))
+                }
             }
             if ProcessInfo.processInfo.environment["ARMSIM_SHOT_STEPS"] != nil, let doc = ws.activeDocument {
                 let executed = Set(ws.debugger.executedAddresses.compactMap { a -> Int? in

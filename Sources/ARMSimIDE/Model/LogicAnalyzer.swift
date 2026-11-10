@@ -42,6 +42,8 @@ struct LATrace: Identifiable {
     /// Change points, cycle ascending.
     let cycles: [UInt64]
     let values: [UInt32]
+    /// Address of the instruction that made each change (Jump to Code).
+    var pcs: [UInt32] = []
 
     /// Value at `cycle` (nil before the first sample).
     func value(at cycle: UInt64) -> UInt32? {
@@ -88,6 +90,7 @@ final class LogicAnalyzer: ObservableObject {
         var config: LASignalConfig
         var cycles: [UInt64] = []
         var values: [UInt32] = []
+        var pcs: [UInt32] = []
         init(_ config: LASignalConfig) { self.config = config }
     }
 
@@ -129,7 +132,7 @@ final class LogicAnalyzer: ObservableObject {
         lock.lock()
         if let s = storage.first(where: { $0.config.id == config.id }) {
             s.config = config
-            if formulaChanged { s.cycles = []; s.values = [] }
+            if formulaChanged { s.cycles = []; s.values = []; s.pcs = [] }
         }
         dirty = true
         lock.unlock()
@@ -208,7 +211,7 @@ final class LogicAnalyzer: ObservableObject {
     // MARK: Sampling (simulation thread)
 
     /// Record value changes. `read(address, size)` reads memory without side effects.
-    func sample(cycle: UInt64, read: (UInt32, Int) -> UInt32?, registers: [UInt32]) {
+    func sample(cycle: UInt64, pc: UInt32, read: (UInt32, Int) -> UInt32?, registers: () -> [UInt32]) {
         lock.lock()
         defer { lock.unlock() }
         sampledCycle = cycle
@@ -216,7 +219,9 @@ final class LogicAnalyzer: ObservableObject {
         for s in storage {
             let raw: UInt32?
             switch s.config.source {
-            case .register(let i): raw = i < registers.count ? registers[i] : nil
+            case .register(let i):
+                let r = registers()
+                raw = i < r.count ? r[i] : nil
             case .memory(let address, let size): raw = read(address, size)
             }
             guard let raw else { continue }
@@ -226,13 +231,16 @@ final class LogicAnalyzer: ObservableObject {
                 // Time went backwards (reset): start a new recording.
                 s.cycles.removeAll(keepingCapacity: true)
                 s.values.removeAll(keepingCapacity: true)
+                s.pcs.removeAll(keepingCapacity: true)
             }
             s.cycles.append(cycle)
             s.values.append(value)
+            s.pcs.append(pc)
             if s.cycles.count > Self.capacity {
                 let drop = s.cycles.count - Self.capacity + Self.capacity / 10
                 s.cycles.removeFirst(drop)
                 s.values.removeFirst(drop)
+                s.pcs.removeFirst(min(drop, s.pcs.count))
             }
             dirty = true
         }
@@ -244,6 +252,7 @@ final class LogicAnalyzer: ObservableObject {
         for s in storage {
             s.cycles.removeAll()
             s.values.removeAll()
+            s.pcs.removeAll()
         }
         sampledCycle = 0
         dirty = true
@@ -267,7 +276,7 @@ final class LogicAnalyzer: ObservableObject {
             let changed = dirty
             dirty = false
             let snapshot = changed
-                ? storage.map { LATrace(id: $0.config.id, config: $0.config, cycles: $0.cycles, values: $0.values) }
+                ? storage.map { LATrace(id: $0.config.id, config: $0.config, cycles: $0.cycles, values: $0.values, pcs: $0.pcs) }
                 : nil
             lock.unlock()
             if let snapshot { traces = snapshot }

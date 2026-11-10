@@ -163,6 +163,9 @@ public final class CPU {
 
     // MARK: Register accessors
 
+    /// Address of the instruction being executed (or of the last one executed).
+    public var instructionAddress: UInt32 { curPC }
+
     public var pc: UInt32 {
         get { r[15] }
         set { r[15] = newValue & ~1 }
