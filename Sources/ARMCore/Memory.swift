@@ -43,8 +43,13 @@ public final class MemoryRegion {
     public let base: UInt32
     public let size: UInt32
     public let kind: Kind
-    /// Backing store for RAM/ROM regions (empty for MMIO).
-    public internal(set) var bytes: [UInt8]
+    /// RAM/ROM backing store (a raw buffer: no array copy-on-write or reference counting on the hot path).
+    let storage: UnsafeMutablePointer<UInt8>
+    /// RAM or ROM (false for MMIO), and the device of an MMIO region: kept apart from `kind` so accesses
+    /// need no enum pattern match (which retains the device).
+    let isMemory: Bool
+    let isROM: Bool
+    let device: MMIODevice?
     /// Accesses must see clocked peripherals up to date (timers, or registers that change their clocks).
     public var clockSensitive = false
 
@@ -53,11 +58,26 @@ public final class MemoryRegion {
         self.base = base
         self.size = size
         self.kind = kind
-        if case .mmio = kind {
-            bytes = []
-        } else {
-            bytes = [UInt8](repeating: 0, count: Int(size))
+        switch kind {
+        case .mmio(let d):
+            device = d
+            isMemory = false
+            isROM = false
+            storage = .allocate(capacity: 1)
+        case .ram, .rom:
+            device = nil
+            isMemory = true
+            if case .rom = kind { isROM = true } else { isROM = false }
+            storage = .allocate(capacity: max(Int(size), 1))
+            storage.initialize(repeating: 0, count: max(Int(size), 1))
         }
+    }
+
+    deinit { storage.deallocate() }
+
+    /// Contents of a RAM/ROM region (empty for MMIO).
+    public var bytes: [UInt8] {
+        isMemory ? Array(UnsafeBufferPointer(start: storage, count: Int(size))) : []
     }
 
     @inline(__always)
@@ -75,7 +95,12 @@ public final class MemoryRegion {
 /// The system bus: a set of non-overlapping regions.
 public final class MemoryMap {
     public private(set) var regions: [MemoryRegion] = []
-    private var lastHit: MemoryRegion?
+    /// The two most recently used regions (typically code and data), not reference counted: `regions` owns them.
+    private unowned(unsafe) var hitA: MemoryRegion = MemoryMap.none
+    private unowned(unsafe) var hitB: MemoryRegion = MemoryMap.none
+    /// Region of the last instruction fetch (code), apart from the data accesses.
+    private unowned(unsafe) var hitCode: MemoryRegion = MemoryMap.none
+    private static let none = MemoryRegion(name: "", base: 0, size: 0, kind: .rom)
     /// Called after every successful CPU write (address, size); nil when nobody listens (Logic Analyzer).
     public var onWrite: ((UInt32, Int) -> Void)?
 
@@ -126,9 +151,10 @@ public final class MemoryMap {
     public var didWriteDevice: (() -> Void)?
 
     public func region(containing address: UInt32) -> MemoryRegion? {
-        if let r = lastHit, r.contains(address, 1) { return r }
+        if hitA.contains(address, 1) { return hitA }
         for r in regions where r.contains(address, 1) {
-            lastHit = r
+            hitB = hitA
+            hitA = r
             return r
         }
         return nil
@@ -136,7 +162,13 @@ public final class MemoryMap {
 
     @inline(__always)
     private func find(_ address: UInt32, _ size: Int, write: Bool) throws -> MemoryRegion {
-        if let r = lastHit, r.contains(address, size) { return r }
+        if hitA.contains(address, size) { return hitA }
+        if hitB.contains(address, size) {
+            let r = hitB
+            hitB = hitA
+            hitA = r
+            return r
+        }
         guard let r = region(containing: address), r.contains(address, size) else {
             throw BusError(address: address, size: size, isWrite: write)
         }
@@ -145,34 +177,73 @@ public final class MemoryMap {
 
     /// Little-endian read of 1, 2 or 4 bytes.
     public func read(_ address: UInt32, size: Int) throws -> UInt32 {
-        let r = try find(address, size, write: false)
+        // Fast path: RAM/ROM of the last region used, through the unowned(unsafe) reference (no retain/release).
+        if hitA.isMemory && hitA.contains(address, size) {
+            let p = UnsafeRawPointer(hitA.storage + Int(address &- hitA.base))
+            switch size {
+            case 4: return p.loadUnaligned(as: UInt32.self)
+            case 2: return UInt32(p.loadUnaligned(as: UInt16.self))
+            default: return UInt32(p.load(as: UInt8.self))
+            }
+        }
+        return try slowRead(address, size: size)
+    }
+
+    /// Instruction fetch (halfword): own region cache, so code in ROM and data in RAM do not evict each other.
+    @inline(__always)
+    public func fetch16(_ address: UInt32) throws -> UInt32 {
+        if hitCode.isMemory && hitCode.contains(address, 2) {
+            return UInt32((UnsafeRawPointer(hitCode.storage + Int(address &- hitCode.base))).loadUnaligned(as: UInt16.self))
+        }
+        let value = try slowRead(address, size: 2)
+        if hitA.isMemory && hitA.contains(address, 2) { hitCode = hitA }
+        return value
+    }
+
+    private func slowRead(_ address: UInt32, size: Int) throws -> UInt32 {
+        unowned(unsafe) let r = try find(address, size, write: false)
         let offset = Int(address &- r.base)
-        if case .mmio(let device) = r.kind {
-            if r.clockSensitive { willAccessDevice?() }
-            return device.read(offset: UInt32(offset), size: size)
+        if r.isMemory {
+            let p = UnsafeRawPointer(r.storage + offset)
+            switch size {
+            case 4: return p.loadUnaligned(as: UInt32.self)
+            case 2: return UInt32(p.loadUnaligned(as: UInt16.self))
+            default: return UInt32(p.load(as: UInt8.self))
+            }
         }
-        return r.bytes.withUnsafeBufferPointer { p in
-            var value: UInt32 = 0
-            for i in 0..<size { value |= UInt32(p[offset + i]) << (8 * i) }
-            return value
-        }
+        if r.clockSensitive { willAccessDevice?() }
+        return r.device!.read(offset: UInt32(offset), size: size)
     }
 
     /// Little-endian write of 1, 2 or 4 bytes. Writes to ROM raise a bus error.
     public func write(_ address: UInt32, size: Int, value: UInt32) throws {
-        let r = try find(address, size, write: true)
-        let offset = Int(address &- r.base)
-        switch r.kind {
-        case .mmio(let device):
-            if r.clockSensitive { willAccessDevice?() }
-            device.write(offset: UInt32(offset), size: size, value: value)
-            if r.clockSensitive { didWriteDevice?() }
-        case .rom:
-            throw BusError(address: address, size: size, isWrite: true)
-        case .ram:
-            r.bytes.withUnsafeMutableBufferPointer { p in
-                for i in 0..<size { p[offset + i] = UInt8(truncatingIfNeeded: value >> (8 * i)) }
+        if hitA.isMemory && !hitA.isROM && hitA.contains(address, size) && onWrite == nil {
+            let p = UnsafeMutableRawPointer(hitA.storage + Int(address &- hitA.base))
+            switch size {
+            case 4: p.storeBytes(of: value, as: UInt32.self)
+            case 2: p.storeBytes(of: UInt16(truncatingIfNeeded: value), as: UInt16.self)
+            default: p.storeBytes(of: UInt8(truncatingIfNeeded: value), as: UInt8.self)
             }
+            return
+        }
+        try slowWrite(address, size: size, value: value)
+    }
+
+    private func slowWrite(_ address: UInt32, size: Int, value: UInt32) throws {
+        unowned(unsafe) let r = try find(address, size, write: true)
+        let offset = Int(address &- r.base)
+        if r.isMemory {
+            if r.isROM { throw BusError(address: address, size: size, isWrite: true) }
+            let p = UnsafeMutableRawPointer(r.storage + offset)
+            switch size {
+            case 4: p.storeBytes(of: value, as: UInt32.self)
+            case 2: p.storeBytes(of: UInt16(truncatingIfNeeded: value), as: UInt16.self)
+            default: p.storeBytes(of: UInt8(truncatingIfNeeded: value), as: UInt8.self)
+            }
+        } else {
+            if r.clockSensitive { willAccessDevice?() }
+            r.device!.write(offset: UInt32(offset), size: size, value: value)
+            if r.clockSensitive { didWriteDevice?() }
         }
         onWrite?(address, size)
     }
@@ -183,18 +254,18 @@ public final class MemoryMap {
         guard let r = region(containing: address), r.contains(address, data.count) else {
             throw BusError(address: address, size: data.count, isWrite: true)
         }
-        if case .mmio = r.kind { throw BusError(address: address, size: data.count, isWrite: true) }
+        if !r.isMemory { throw BusError(address: address, size: data.count, isWrite: true) }
         let offset = Int(address &- r.base)
-        r.bytes.replaceSubrange(offset..<(offset + data.count), with: data)
+        data.withUnsafeBufferPointer { (r.storage + offset).update(from: $0.baseAddress!, count: data.count) }
     }
 
     /// Debugger register read (uses `peek`, so no read side effects). Nil if unmapped.
     public func peekRegister(_ address: UInt32, size: Int) -> UInt32? {
         guard let r = region(containing: address), r.contains(address, size) else { return nil }
         let offset = address &- r.base
-        if case .mmio(let device) = r.kind { return device.peek(offset: offset, size: size) }
+        if let device = r.device { return device.peek(offset: offset, size: size) }
         var value: UInt32 = 0
-        for i in 0..<size { value |= UInt32(r.bytes[Int(offset) + i]) << (8 * i) }
+        for i in 0..<size { value |= UInt32(r.storage[Int(offset) + i]) << (8 * i) }
         return value
     }
 
@@ -228,7 +299,7 @@ public final class MemoryMap {
                 if word?.address != aligned { word = (aligned, device.peek(offset: aligned &- r.base, size: 4)) }
                 return UInt8(truncatingIfNeeded: word!.value >> (8 * (a & 3)))
             }
-            return r.bytes[Int(a &- r.base)]
+            return r.storage[Int(a &- r.base)]
         }
     }
 }

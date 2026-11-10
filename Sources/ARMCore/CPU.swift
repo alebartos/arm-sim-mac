@@ -283,7 +283,8 @@ public final class CPU {
             try reset()
             return .none
         }
-        if let exception = exceptionToTake() {
+        // anyPending first: nothing pending is the common case, checked without a call.
+        if system.anyPending, let exception = exceptionToTake() {
             sleeping = false
             try enterException(exception, returnAddress: r[15])
             return .exceptionEntry(UInt32(exception))
@@ -312,7 +313,7 @@ public final class CPU {
             try takeFault(fault)
             return event
         }
-        system.tickSysTick(1)
+        if system.sysTickCSR & 1 != 0 { system.tickSysTick(1) }
         deviceDebt &+= 1
         if deviceDebt >= deviceHorizon { syncDevices() }
         return event
@@ -371,8 +372,8 @@ public final class CPU {
         var hw1: UInt32 = 0
         var hw2: UInt32 = 0
         do {
-            hw1 = try memory.read(curPC, size: 2)
-            if hw1 >= 0xE800 { hw2 = try memory.read(curPC &+ 2, size: 2) }
+            hw1 = try memory.fetch16(curPC)
+            if hw1 >= 0xE800 { hw2 = try memory.fetch16(curPC &+ 2) }
         } catch let e as BusError {
             throw CPUFault.bus(e, pc: curPC)
         }
