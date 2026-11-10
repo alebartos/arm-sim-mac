@@ -549,6 +549,8 @@ extension SmokeTest {
             // (the tip is also saved next to the output as <name>-tip.png).
             if let typed = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TYPE"],
                let view = (EditorCommands.textView ?? EditorCommands.lastEditor) as? EditorTextView {
+                NSApp.activate(ignoringOtherApps: true)
+                view.window?.makeKeyAndOrderFront(nil)
                 view.window?.makeFirstResponder(view)
                 // The debugger moves the caret to the PC: place it again (ARMSIM_SHOT_CARET).
                 if let at = ProcessInfo.processInfo.environment["ARMSIM_SHOT_CARET"]?.split(separator: ":").compactMap({ Int($0) }), at.count == 2 {
@@ -559,6 +561,10 @@ extension SmokeTest {
                 }
                 let original = view.string
                 let caret = view.selectedRange()
+                // ARMSIM_SHOT_FILLUP=1: ENTER/TAB as fill-up character for this run (not saved).
+                let fillUp = EditorSettings.shared.config.completionFillUp
+                if ProcessInfo.processInfo.environment["ARMSIM_SHOT_FILLUP"] != nil { EditorSettings.shared.config.completionFillUp = true }
+                defer { EditorSettings.shared.config.completionFillUp = fillUp }
                 for ch in typed { view.insertText(String(ch), replacementRange: view.selectedRange()) }
                 // The typed text is never saved: the document is restored after logging.
                 defer {
@@ -572,6 +578,23 @@ extension SmokeTest {
                 let words = view.completions(forPartialWordRange: view.rangeForUserCompletion, indexOfSelectedItem: &selected) ?? []
                 FileHandle.standardError.write(Data("[shot] completions (\(words.count)): \(words.prefix(40).joined(separator: " "))\n".utf8))
                 FileHandle.standardError.write(Data("[shot] tip: \(view.parameterTipText ?? "-")\n".utf8))
+                // ARMSIM_SHOT_TYPE_AFTER=<text>: once the completion list is open, press these keys (real key events;
+                // "\n" = Return) and log the caret line.
+                if let after = ProcessInfo.processInfo.environment["ARMSIM_SHOT_TYPE_AFTER"], let window = view.window {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+                    for ch in after.replacingOccurrences(of: "\\n", with: "\r") {
+                        let chars = String(ch)
+                        if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: window.windowNumber, context: nil, characters: chars,
+                                                    charactersIgnoringModifiers: chars, isARepeat: false, keyCode: ch == "\r" ? 36 : ch == " " ? 49 : 0) {
+                            NSApp.sendEvent(e)   // RunLoop.run does not dequeue posted events
+                        }
+                        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                    }
+                    let text = view.string as NSString
+                    let line = text.lineRange(for: NSRange(location: max(view.selectedRange().location - 1, 0), length: 0))
+                    FileHandle.standardError.write(Data("[shot] line after keys: \(text.substring(with: line).debugDescription)\n".utf8))
+                }
                 if view.parameterTipText != nil, let tip = view.window?.childWindows?.first(where: { $0 is ParameterTipWindow }),
                    let content = tip.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
                     content.cacheDisplay(in: content.bounds, to: rep)

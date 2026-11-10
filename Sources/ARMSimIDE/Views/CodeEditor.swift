@@ -385,8 +385,18 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
 
     override var rangeForUserCompletion: NSRange { partialWord() }
 
+    /// Text the user typed when the list opened (kept when the list closes on another key).
+    private var completionPrefix = ""
+
     override func insertCompletion(_ word: String, forPartialWordRange charRange: NSRange, movement: Int, isFinal flag: Bool) {
         completing = !flag
+        var word = word
+        // As in µVision only Return / Tab (or a click) accept the item: a space, a comma, ... closes the list and
+        // keeps what was typed ("ADD r0" must not become "Address r0").
+        if flag, movement != NSTextMovement.cancel.rawValue, let event = NSApp.currentEvent, event.type == .keyDown,
+           ![36, 76, 48].contains(event.keyCode) {
+            word = completionPrefix
+        }
         super.insertCompletion(word, forPartialWordRange: charRange, movement: movement, isFinal: flag)
         if flag { completing = false }
     }
@@ -395,6 +405,7 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
     /// identifiers of this file.
     override func completions(forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>) -> [String]? {
         let prefix = (string as NSString).substring(with: charRange)
+        completionPrefix = prefix
         // After `.` / `->`: only the members of that struct / union.
         if kind == .c || kind == .header, let op = accessOperator(before: charRange.location) {
             guard config.completionMembers, let product = ws.lastProduct,
@@ -403,14 +414,13 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
             let lower = prefix.lowercased()
             let result = members.filter { $0.lowercased().hasPrefix(lower) && $0 != prefix }
                 .sorted { $0.lowercased() < $1.lowercased() }
-            index.pointee = result.isEmpty ? -1 : 0
+            index.pointee = result.isEmpty || !config.completionFillUp ? -1 : 0
             return result.isEmpty ? nil : result
         }
         guard !prefix.isEmpty else { return nil }
         var words = Set<String>()
         if kind == .asm {
-            words.formUnion(["AREA", "EXPORT", "IMPORT", "ENTRY", "PROC", "ENDP", "DCD", "DCB", "DCW", "SPACE", "EQU",
-                             "ALIGN", "THUMB", "PRESERVE8", "LDR", "STR", "MOV", "PUSH", "POP", "BX", "BL", "CMP", "B"])
+            words.formUnion(Self.asmWords)
         } else {
             words.formUnion(SyntaxHighlighter.cKeywords)
         }
@@ -428,9 +438,18 @@ final class EditorTextView: NSTextView, NSLayoutManagerDelegate {
         let lower = prefix.lowercased()
         let result = words.filter { $0.count > prefix.count && $0.lowercased().hasPrefix(lower) }
             .sorted { $0.lowercased() < $1.lowercased() }
-        index.pointee = result.isEmpty ? -1 : 0
+        // No item is preselected unless ENTER/TAB is a fill-up character (µVision default: off): a preselected
+        // item is inserted tentatively, so a space after "ADD" would have produced "Address".
+        index.pointee = result.isEmpty || !config.completionFillUp ? -1 : 0
         return result.isEmpty ? nil : Array(result.prefix(300))
     }
+
+    /// armasm directives and Thumb-2 / FPU mnemonics for the completion list of assembler files.
+    static let asmWords: [String] = {
+        let directives = "AREA EXPORT IMPORT GLOBAL EXTERN ENTRY END PROC ENDP FUNCTION ENDFUNC DCD DCDU DCB DCW DCWU DCQ SPACE FILL EQU RN ALIGN THUMB ARM CODE16 CODE32 PRESERVE8 REQUIRE8 IF ELSE ENDIF ELIF WHILE WEND MACRO MEND MEXIT INCLUDE GET INCBIN LTORG READONLY READWRITE NOINIT ALIGN WEAK"
+        let mnemonics = "ADC ADCS ADD ADDS ADDW ADR AND ANDS ASR ASRS B BL BLX BX BEQ BNE BCS BCC BMI BPL BVS BVC BHI BLS BGE BLT BGT BLE BFC BFI BIC BICS BKPT CBNZ CBZ CLREX CLZ CMN CMP CPSID CPSIE DMB DSB EOR EORS ISB IT ITE ITT ITTE ITET LDM LDMIA LDMDB LDR LDRB LDRH LDRSB LDRSH LDRD LDREX LSL LSLS LSR LSRS MLA MLS MOV MOVS MOVW MOVT MRS MSR MUL MULS MVN MVNS NOP ORN ORR ORRS POP PUSH RBIT REV REV16 REVSH ROR RORS RRX RSB RSBS SBC SBCS SBFX SDIV SEV SMLAL SMULL SSAT STM STMIA STMDB STR STRB STRH STRD STREX SUB SUBS SUBW SVC SXTB SXTH TBB TBH TEQ TST UBFX UDIV UMLAL UMULL USAT UXTB UXTH WFE WFI YIELD VADD VSUB VMUL VDIV VMOV VLDR VSTR VPUSH VPOP VCMP VCVT VABS VNEG VSQRT VMRS VMSR"
+        return (directives + " " + mnemonics).split(separator: " ").map(String.init)
+    }()
 
     /// Index of the `.` (or of the `-` of `->`) right before `location`, spaces skipped.
     private func accessOperator(before location: Int) -> Int? {

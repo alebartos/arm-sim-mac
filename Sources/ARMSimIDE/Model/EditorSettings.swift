@@ -57,6 +57,8 @@ struct EditorConfig: Codable, Equatable {
     /// Members list after `.` / `->` and the parameter tip after `(` (DWARF of the last build).
     var completionMembers = true
     var completionParameters = true
+    /// ENTER/TAB as fill-up character: the first item is preselected and accepted with Return / Tab.
+    var completionFillUp = false
 
     // Shortcut Keys tab: "Menu:Item" -> "⌃⇧F9" ("" = shortcut removed); built-in keys otherwise.
     var shortcuts: [String: String] = [:]

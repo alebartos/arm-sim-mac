@@ -416,7 +416,7 @@ struct ConfigurationDialog: View {
                             Stepper("", value: $config.completionCharacters, in: 1...9).labelsHidden()
                             Text("Characters")
                         }
-                        Toggle("ENTER/TAB as fill-up character", isOn: .constant(false)).disabled(true).help("Not available yet")
+                        Toggle("ENTER/TAB as fill-up character", isOn: $config.completionFillUp)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(2)
                 }
