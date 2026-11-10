@@ -1106,6 +1106,53 @@ func runLPCTest(native: Bool) throws -> String? {
     return nil
 }
 
+/// PWM1 at register level: single edge PWM1.1 (MR1) and double edge PWM1.3 (MR2..MR3) on P2.0 / P2.2, period MR0
+/// with reset + interrupt, and the LER latch of a match register written in PWM mode.
+func runPWMTest() throws -> String? {
+    let memory = MemoryMap()
+    memory.addRAM(name: "IRAM1", base: 0x1000_0000, size: 0x8000)
+    let sim = Simulator(arch: .armv7m, memory: memory)
+    let lpc = LPC17xx.install(on: sim)
+    let pwm: UInt32 = 0x4001_8000
+    func w(_ address: UInt32, _ value: UInt32) throws { try memory.write(address, size: 4, value: value) }
+    func r(_ address: UInt32) throws -> UInt32 { try memory.read(address, size: 4) }
+    try w(0x4002_C010, 0x11)                  // PINSEL4: P2.0 = PWM1.1, P2.2 = PWM1.3
+    try w(pwm + 0x18, 100)                    // MR0: period 101 counts
+    try w(pwm + 0x1C, 25)                     // MR1: PWM1.1 high for TC 0..24
+    try w(pwm + 0x20, 60)                     // MR2: PWM1.3 set
+    try w(pwm + 0x24, 80)                     // MR3: PWM1.3 clear
+    try w(pwm + 0x14, 3)                      // MCR: MR0 interrupt + reset
+    try w(pwm + 0x4C, (1 << 9) | (1 << 11) | (1 << 3))  // PCR: PWMENA1, PWMENA3, PWMSEL3 (double edge)
+    try w(pwm + 0x04, 2)                      // TCR: reset
+    try w(pwm + 0x04, 9)                      // TCR: counter + PWM enable
+    let divider: UInt64 = 4                   // PCLK_PWM1 = CCLK/4 after reset
+    func at(_ tc: UInt64) -> (UInt32, Bool, Bool) {
+        lpc.pwm.tick(tc * divider - (UInt64(try! r(pwm + 0x08)) * divider))
+        let pins = lpc.gpio.pins(2)
+        return (try! r(pwm + 0x08), pins & 1 != 0, pins & 4 != 0)
+    }
+    var s = at(10)
+    if s != (10, true, false) { return "TC 10: \(s), expected PWM1.1 high, PWM1.3 low" }
+    s = at(30)
+    if s != (30, false, false) { return "TC 30: \(s), expected both low" }
+    s = at(70)
+    if s != (70, false, true) { return "TC 70: \(s), expected PWM1.3 high" }
+    try w(pwm + 0x1C, 50)                     // MR1 in PWM mode: shadow until the period ends
+    try w(pwm + 0x50, 2)                      // LER: latch MR1
+    if try r(pwm + 0x1C) != 25 { return "MR1 changed before the end of the period" }
+    s = at(90)
+    if s != (90, false, false) { return "TC 90: \(s), expected both low" }
+    if try r(pwm) != 0 { return "IR set before MR0" }
+    lpc.pwm.tick(11 * divider)                // TC 100 -> 0 (MR0 reset)
+    if try r(pwm + 0x08) != 0 { return "TC \(try r(pwm + 0x08)) after the period, expected 0" }
+    if try r(pwm) & 1 == 0 { return "MR0 interrupt flag not set" }
+    if !sim.cpu.system.pending[16 + 9] { return "PWM1 IRQ 9 not pending" }
+    if try r(pwm + 0x1C) != 50 { return "MR1 not latched by LER at the end of the period" }
+    s = at(40)
+    if s != (40, true, false) { return "TC 40 with MR1 = 50: \(s), expected PWM1.1 high" }
+    return nil
+}
+
 
 // MARK: - Native armasm assembler: encoder vs clang
 
@@ -1555,6 +1602,7 @@ print("\n== Keil armasm syntax")
 report("[M3] armasm startup + SVC + tables (LPC1768 layout)") { try runArmasmTest(native: false) }
 
 report("[M3] LPC17xx PLL lock, TIMER0 + RIT interrupts, WFI, GPIO (LandTiger)") { try runLPCTest(native: false) }
+report("[M3] LPC17xx PWM1: single/double edge outputs on P2, MR0 period IRQ, LER latch") { try runPWMTest() }
 
 print("\n== Native armasm assembler")
 report("[M3] encoder vs clang (\(encoderCorpus.count) instructions)") { try runEncoderCorpus(encoderCorpus, profile: profiles[0]) }

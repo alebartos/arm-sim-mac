@@ -33,7 +33,7 @@ public class WordDevice: MMIODevice {
 }
 
 public enum LPCPeripheralClock: Int, CaseIterable {
-    case timer0, timer1, timer2, timer3, rit, adc, dac
+    case timer0, timer1, timer2, timer3, rit, adc, dac, pwm1
 }
 
 // MARK: - System control (0x400FC000)
@@ -116,6 +116,7 @@ public final class LPCSystemControl: WordDevice {
         case .rit: field = ((registers[0x1AC] ?? 0) >> 26) & 3
         case .adc: field = ((registers[0x1A8] ?? 0) >> 24) & 3
         case .dac: field = ((registers[0x1A8] ?? 0) >> 22) & 3
+        case .pwm1: field = ((registers[0x1A8] ?? 0) >> 12) & 3
         }
         return [4, 1, 2, 8][Int(field)]
     }
@@ -135,6 +136,9 @@ public final class LPCGPIO: WordDevice {
     public private(set) var output = [UInt32](repeating: 0, count: 5)
     /// Level applied to input pins from outside (pull-ups: high by default).
     public var input = [UInt32](repeating: 0xFFFF_FFFF, count: 5)
+    /// Pins driven by a peripheral function (e.g. PWM1 outputs) and their levels; they override GPIO.
+    public var alternate = [UInt32](repeating: 0, count: 5)
+    public var alternateLevel = [UInt32](repeating: 0, count: 5)
     /// Called after every register write (board devices wired to the pins, e.g. the LCD).
     var onWrite: (() -> Void)?
 
@@ -143,7 +147,8 @@ public final class LPCGPIO: WordDevice {
     public static let pinMask: [UInt32] = [0x7FFF_8FFF, 0xFFFF_C713, 0x0000_3FFF, 0x0600_0000, 0x3000_0000]
 
     public func pins(_ port: Int) -> UInt32 {
-        ((output[port] & direction[port]) | (input[port] & ~direction[port])) & Self.pinMask[port]
+        let gpio = (output[port] & direction[port]) | (input[port] & ~direction[port])
+        return ((gpio & ~alternate[port]) | (alternateLevel[port] & alternate[port])) & Self.pinMask[port]
     }
 
     override func readWord(_ offset: UInt32) -> UInt32 {
@@ -289,6 +294,183 @@ public final class LPCTimer: WordDevice, ClockedDevice {
         guard running else { return nil }
         var best: UInt64?
         for i in 0..<4 where (matchControl >> UInt32(3 * i)) & 1 != 0 {
+            let distance = resetOnNextCount ? UInt64(match[i]) + 1 : UInt64(match[i] &- counter)
+            let increments = distance == 0 ? (UInt64(1) << 32) : distance
+            let pclks = UInt64(prescale &- prescaleCounter) + 1 + (increments - 1) * (UInt64(prescale) + 1)
+            let cycles = pclks * divider
+            let c = cycles > accumulator ? cycles - accumulator : 1
+            best = min(best ?? c, c)
+        }
+        return best
+    }
+}
+
+// MARK: - PWM1 (0x40018000)
+
+/// PWM1 (UM10360 chapter 24): timer with prescaler, match registers MR0-MR6 (shadowed in PWM mode, latched by
+/// LER at the end of the period), match actions (interrupt / reset / stop, IRQ 9) and six outputs, single edge
+/// (set at the period start, cleared at MRn) or double edge (PWMSELn: set at MR(n-1), cleared at MRn).
+public final class LPCPWM: WordDevice, ClockedDevice {
+    var control: LPCSystemControl?
+    var system: SystemControl?
+    let irq = 9
+
+    public private(set) var interruptFlags: UInt32 = 0  // IR
+    public private(set) var timerControl: UInt32 = 0    // TCR: 0 enable, 1 reset, 3 PWM enable
+    public private(set) var counter: UInt32 = 0         // TC
+    public private(set) var prescale: UInt32 = 0        // PR
+    public private(set) var prescaleCounter: UInt32 = 0 // PC
+    public private(set) var matchControl: UInt32 = 0    // MCR (3 bits per MR0-MR6)
+    /// Active match registers MR0-MR6 and the values written while PWM mode is on (latched through LER).
+    public private(set) var match = [UInt32](repeating: 0, count: 7)
+    private var shadow = [UInt32](repeating: 0, count: 7)
+    public private(set) var pwmControl: UInt32 = 0      // PCR: bits 2-6 PWMSELn, 9-14 PWMENA1-6
+    private var latchEnable: UInt32 = 0                 // LER
+    private var other: [UInt32: UInt32] = [:]
+    private var accumulator: UInt64 = 0
+    private var resetOnNextCount = false
+    /// Output levels PWM1.1-1.6 (bit n-1).
+    public private(set) var outputs: UInt32 = 0
+    /// Called when an enabled output changes level.
+    var onOutputs: ((UInt32) -> Void)?
+
+    private var running: Bool { timerControl & 1 != 0 && timerControl & 2 == 0 && (other[0x70] ?? 0) & 3 == 0 }
+    private var pwmMode: Bool { timerControl & 8 != 0 }
+
+    private static func matchOffset(_ i: Int) -> UInt32 { i < 4 ? 0x18 + UInt32(i) * 4 : 0x40 + UInt32(i - 4) * 4 }
+    private static func matchIndex(_ offset: UInt32) -> Int? {
+        switch offset {
+        case 0x18, 0x1C, 0x20, 0x24: return Int(offset - 0x18) / 4
+        case 0x40, 0x44, 0x48: return 4 + Int(offset - 0x40) / 4
+        default: return nil
+        }
+    }
+
+    override func readWord(_ offset: UInt32) -> UInt32 {
+        if let i = Self.matchIndex(offset) { return match[i] }
+        switch offset {
+        case 0x00: return interruptFlags
+        case 0x04: return timerControl
+        case 0x08: return counter
+        case 0x0C: return prescale
+        case 0x10: return prescaleCounter
+        case 0x14: return matchControl
+        case 0x4C: return pwmControl
+        case 0x50: return latchEnable
+        default: return other[offset] ?? 0
+        }
+    }
+
+    override func writeWord(_ offset: UInt32, _ value: UInt32, mask: UInt32) {
+        if let i = Self.matchIndex(offset) {
+            shadow[i] = merge(shadow[i], value, mask)
+            if !pwmMode { match[i] = shadow[i] }
+            return
+        }
+        switch offset {
+        case 0x00: interruptFlags &= ~(value & mask & 0x73F)
+        case 0x04:
+            timerControl = merge(timerControl, value, mask) & 0xB
+            if timerControl & 2 != 0 { counter = 0; prescaleCounter = 0; accumulator = 0; resetOnNextCount = false }
+        case 0x08: counter = merge(counter, value, mask)
+        case 0x0C: prescale = merge(prescale, value, mask)
+        case 0x10: prescaleCounter = merge(prescaleCounter, value, mask)
+        case 0x14: matchControl = merge(matchControl, value, mask) & 0x1F_FFFF
+        case 0x4C:
+            pwmControl = merge(pwmControl, value, mask) & 0x7E7C
+            updateOutputs()
+        case 0x50: latchEnable = merge(latchEnable, value, mask) & 0x7F
+        default: other[offset] = merge(other[offset] ?? 0, value, mask)
+        }
+    }
+
+    private var divider: UInt64 { control?.divider(.pwm1) ?? 4 }
+
+    /// Counts at which something happens: matches with an action, and in PWM mode every match (output edges).
+    private func isEventMatch(_ i: Int) -> Bool { pwmMode || (matchControl >> UInt32(3 * i)) & 7 != 0 }
+
+    private func incrementsToNextEvent() -> UInt64? {
+        var best: UInt64?
+        for i in 0..<7 where isEventMatch(i) {
+            let distance = UInt64(match[i] &- counter)
+            let d = distance == 0 ? (UInt64(1) << 32) : distance
+            best = min(best ?? d, d)
+        }
+        return best
+    }
+
+    public func tick(_ cycles: UInt64) {
+        guard running else { return }
+        accumulator += cycles
+        var ticks = accumulator / divider
+        accumulator %= divider
+        let period = UInt64(prescale) + 1
+        while ticks > 0 && running {
+            let toIncrement = UInt64(prescale &- prescaleCounter) + 1
+            if ticks < toIncrement {
+                prescaleCounter &+= UInt32(ticks)
+                return
+            }
+            ticks -= toIncrement
+            prescaleCounter = 0
+            if !resetOnNextCount, let distance = incrementsToNextEvent(), distance > 1 {
+                let skip = min(ticks / period, distance - 1)
+                counter &+= UInt32(truncatingIfNeeded: skip)
+                ticks -= skip * period
+            }
+            incrementCounter()
+        }
+    }
+
+    private func incrementCounter() {
+        if resetOnNextCount {
+            counter = 0
+            resetOnNextCount = false
+            // End of the PWM period: latch the match registers enabled in LER.
+            if pwmMode && latchEnable != 0 {
+                for i in 0..<7 where latchEnable & (1 << UInt32(i)) != 0 { match[i] = shadow[i] }
+                latchEnable = 0
+            }
+        } else {
+            counter &+= 1
+        }
+        for i in 0..<7 where counter == match[i] {
+            let actions = (matchControl >> UInt32(3 * i)) & 7
+            if actions & 1 != 0 {
+                interruptFlags |= i < 4 ? 1 << UInt32(i) : 1 << UInt32(i + 4)
+                system?.setPending(irq: irq)
+            }
+            if actions & 2 != 0 { resetOnNextCount = true }
+            if actions & 4 != 0 { timerControl &= ~1 }
+        }
+        updateOutputs()
+    }
+
+    /// Output levels for the current TC (the period restarts when MR0 resets TC).
+    private func updateOutputs() {
+        var levels: UInt32 = 0
+        if pwmMode {
+            for n in 1...6 where pwmControl & (1 << UInt32(8 + n)) != 0 {
+                let high: Bool
+                if n >= 2, pwmControl & (1 << UInt32(n)) != 0 {
+                    let (set, clear) = (match[n - 1], match[n])
+                    high = set <= clear ? counter >= set && counter < clear : counter >= set || counter < clear
+                } else {
+                    high = counter < match[n]
+                }
+                if high { levels |= 1 << UInt32(n - 1) }
+            }
+        }
+        if levels != outputs {
+            outputs = levels
+            onOutputs?(levels)
+        }
+    }
+
+    public func cyclesUntilEvent() -> UInt64? {
+        guard running else { return nil }
+        var best: UInt64?
+        for i in 0..<7 where isEventMatch(i) {
             let distance = resetOnNextCount ? UInt64(match[i]) + 1 : UInt64(match[i] &- counter)
             let increments = distance == 0 ? (UInt64(1) << 32) : distance
             let pclks = UInt64(prescale &- prescaleCounter) + 1 + (increments - 1) * (UInt64(prescale) + 1)
@@ -615,6 +797,7 @@ public final class LPC17xx {
         LPCTimer(index: 2, irq: 3, clock: .timer2), LPCTimer(index: 3, irq: 4, clock: .timer3),
     ]
     public let rit = LPCRIT()
+    public let pwm = LPCPWM()
     public let adc = LPCADC()
     public let dac = LPCDAC()
     public let lcd = LandTigerLCD()
@@ -647,6 +830,10 @@ public final class LPC17xx {
         memory.addMMIO(name: "TIMER2", base: 0x4009_0000, size: 0x4000, device: lpc.timers[2])
         memory.addMMIO(name: "TIMER3", base: 0x4009_4000, size: 0x4000, device: lpc.timers[3])
         memory.addMMIO(name: "RIT", base: 0x400B_0000, size: 0x4000, device: lpc.rit)
+        lpc.pwm.system = system
+        lpc.pwm.control = lpc.systemControl
+        lpc.pwm.onOutputs = { [unowned lpc] _ in lpc.applyPWMPins() }
+        memory.addMMIO(name: "PWM1", base: 0x4001_8000, size: 0x4000, device: lpc.pwm)
         memory.addMMIO(name: "PINCON", base: 0x4002_C000, size: 0x4000, device: lpc.pinConnect)
         lpc.gpio.onWrite = { [unowned lpc] in
             lpc.lcd.gpioChanged(lpc.gpio)
@@ -674,8 +861,34 @@ public final class LPC17xx {
             uart.system = system
             memory.addMMIO(name: "UART\(uart.index)", base: base, size: 0x4000, device: uart)
         }
-        sim.cpu.clockedDevices += lpc.timers as [ClockedDevice] + [lpc.rit, lpc.adc]
+        sim.cpu.clockedDevices += lpc.timers as [ClockedDevice] + [lpc.rit, lpc.pwm, lpc.adc]
         return lpc
+    }
+
+    /// PWM1.1-1.6 outputs onto the pins whose PINSEL selects them: P2.0-2.5 (PINSEL4 function 01) and
+    /// P1.18/20/21/23/24/26 (PINSEL3 function 10).
+    func applyPWMPins() {
+        let levels = pwm.outputs
+        let pinsel3 = pinConnect.read(offset: 0x0C, size: 4)
+        let pinsel4 = pinConnect.read(offset: 0x10, size: 4)
+        var alt1: UInt32 = 0, level1: UInt32 = 0, alt2: UInt32 = 0, level2: UInt32 = 0
+        for n in 0..<6 {
+            let high = levels & (1 << UInt32(n)) != 0
+            if (pinsel4 >> UInt32(2 * n)) & 3 == 1 {
+                alt2 |= 1 << UInt32(n)
+                if high { level2 |= 1 << UInt32(n) }
+            }
+            let p1 = [18, 20, 21, 23, 24, 26][n]
+            if (pinsel3 >> UInt32(2 * (p1 - 16))) & 3 == 2 {
+                alt1 |= 1 << UInt32(p1)
+                if high { level1 |= 1 << UInt32(p1) }
+            }
+        }
+        let p1Pins: UInt32 = [18, 20, 21, 23, 24, 26].reduce(0) { $0 | (1 << UInt32($1)) }
+        gpio.alternate[1] = (gpio.alternate[1] & ~p1Pins) | alt1
+        gpio.alternateLevel[1] = (gpio.alternateLevel[1] & ~p1Pins) | level1
+        gpio.alternate[2] = (gpio.alternate[2] & ~0x3F) | alt2
+        gpio.alternateLevel[2] = (gpio.alternateLevel[2] & ~0x3F) | level2
     }
 
     /// LandTiger joystick, active low on P1.25 (select), P1.26 (down), P1.27 (left), P1.28 (right), P1.29 (up).
