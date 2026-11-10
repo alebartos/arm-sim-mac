@@ -109,7 +109,7 @@ struct VariablesView: View {
                 if let result = debugger.evaluate(e) {
                     return ValueNode(id: id, name: e, typeName: "", valueText: result.text, address: nil, children: [])
                 }
-                return ValueNode(id: id, name: e, typeName: "", valueText: "<cannot evaluate>", address: nil, children: [])
+                return ValueNode(id: id, name: e, typeName: "uchar", valueText: "<cannot evaluate>", address: nil, children: [])
             }, nil)
         }
         guard debugger.isActive else { return ([], "Start a debug session to see variables.") }

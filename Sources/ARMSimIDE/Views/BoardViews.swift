@@ -257,7 +257,9 @@ struct LandTigerWindow: View {
 /// (object file) holding its functions and variables. The mask filters names (`*` and `?` wildcards).
 struct SymbolsPanel: View {
     @ObservedObject var workspace: Workspace
-    @LocalState private var mask = ""
+    @ObservedObject private var viewer = SystemViewerState.shared
+    // ARMSIM_SHOT_SYMBOLS=<mask>: initial mask (screenshots).
+    @LocalState private var mask = ProcessInfo.processInfo.environment["ARMSIM_SHOT_SYMBOLS"] ?? ""
     @LocalState private var expanded: Set<String> = ["app"]
 
     private struct Node: Identifiable {
@@ -301,9 +303,20 @@ struct SymbolsPanel: View {
                             type: v.type?.displayName ?? "", address: address)
             }
             return Node(id: "m:\(module.name)", name: module.name, type: "Module", children: children.filter { matches($0.name) })
+        }.filter { !$0.children.isEmpty || mask.trimmingCharacters(in: .whitespaces).isEmpty || mask == "*" }
+        // Special Function Registers: the device's peripheral registers from its SVD file.
+        let sfrs = (viewer.svd?.peripherals ?? []).sorted { $0.name < $1.name }.compactMap { p -> Node? in
+            let registers = p.registers.filter { matches($0.name) || matches(p.name) }.map { r -> Node in
+                let address = p.address(of: r)
+                return Node(id: "sfr:\(p.name).\(r.name)", name: r.name, location: String(format: "0x%08X", address),
+                            type: r.size <= 8 ? "uchar" : r.size <= 16 ? "ushort" : "uint", address: address)
+            }
+            guard !registers.isEmpty else { return nil }
+            return Node(id: "sfr:\(p.name)", name: p.name, location: String(format: "0x%08X", p.baseAddress), children: registers)
         }
         let app = workspace.lastProduct.map { $0.axfURL.deletingPathExtension().lastPathComponent } ?? "Application"
         return [Node(id: "vt", name: "Virtual Registers", children: vtregs),
+                Node(id: "sfr", name: "Special Function Registers", children: sfrs),
                 Node(id: "app", name: app, type: "Application", children: modules)]
     }
 
