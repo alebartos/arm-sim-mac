@@ -2,6 +2,8 @@
 
 A µVision-style IDE and Cortex-M simulator for macOS.
 
+![ARM Sim debugging a startup.s file: registers, disassembly, source with breakpoint, call stack](docs/Screenshot%202026-11-13%20alle%2003.45.18.png)
+
 ARM Sim is for students and developers who use Keil µVision on Windows and want to work on a Mac. You can open a `.uvprojx` project, build it and debug it in a simulator. The layout follows the µVision layout, so moving between the two tools is easy.
 
 It has been tested mainly on the LPC1768 / LandTiger projects of the Politecnico di Torino computer architecture course.
