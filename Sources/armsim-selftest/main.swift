@@ -1286,6 +1286,7 @@ func runEncoderCorpus(_ lines: [String], profile: Profile) throws -> String? {
 
 /// Encodings taken from Keil armasm listings (public GitHub projects + PoliTo templates).
 let keilConfirmed: [(line: String, bytes: String)] = [
+    ("POP {PC}", "BD00"), ("pop {pc}", "BD00"), ("LDMFD SP!, {PC}", "BD00"),
     ("STMFD SP!, {R4, LR}", "B510"), ("STMFD SP!, {R0-R4, LR}", "B51F"), ("STMDB SP!, {R4, R5}", "B430"),
     ("STMFD SP!, {R4-R11, LR}", "E92D 4FF0"), ("PUSH {R12, LR}", "E92D 5000"), ("PUSH {R0, LR}", "B501"),
     ("STMFD r1!, {r4}", "F841 4D04"), ("STMFD r0!, {lr}", "F840 ED04"), ("LDMFD R0!, {LR}", "F850 EB04"),

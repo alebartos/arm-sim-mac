@@ -1062,7 +1062,10 @@ private final class Assembly: ExprEnvironment {
             if item.hasSuffix("!"), let r = parseRegister(String(item.dropLast())) { result.append(.regWriteback(r)); continue }
             if item.hasPrefix("#") { result.append(.imm(try evaluateValue(String(item.dropFirst())))); continue }
             if item.hasPrefix("[") { result.append(try parseMemory(item)); continue }
-            if item.hasPrefix("{") && !upper.hasPrefix("{PC}") && !upper.hasPrefix("{TRUE}") && !upper.hasPrefix("{FALSE}") {
+            // {PC} is armasm's current-location variable, except as the register list of PUSH / POP / LDM / STM
+            // ("POP {PC}" returns from a function).
+            let takesList = ["PUSH", "POP", "LDM", "STM"].contains { mnemonic.uppercased().hasPrefix($0) }
+            if item.hasPrefix("{") && (takesList || (!upper.hasPrefix("{PC}") && !upper.hasPrefix("{TRUE}") && !upper.hasPrefix("{FALSE}"))) {
                 result.append(.regList(try parseRegisterList(item)))
                 continue
             }
