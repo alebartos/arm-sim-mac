@@ -88,7 +88,7 @@ release page opens so you can install the update by hand.
 
 ```sh
 ./scripts/make-app.sh          # creates build/ARM Sim.app
-./scripts/make-dmg.sh v0.3.0   # also packs it into build/ARM-Sim-v0.3.0-macOS.dmg
+./scripts/make-dmg.sh v0.4.0   # also packs it into build/ARM-Sim-v0.4.0-macOS.dmg
 open "build/ARM Sim.app"
 ```
 
