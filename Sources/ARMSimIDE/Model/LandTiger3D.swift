@@ -11,6 +11,8 @@ enum LandTiger3D {
         "LANDTIGER/Board (LCD).obj", "LANDTIGER/board_complete.mtl", "LANDTIGER/board_texture.tga", "LANDTIGER/lcd_texture.tga",
         "LEDS/LEDS(ON).obj", "BUTTONS/Model.obj", "JOYSTICK/Model.obj", "POTMETER/Model.obj",
     ]
+    /// Used when present (imports made before the speaker animation do not have it).
+    static let optionalFiles = ["SPEAKER/Model.obj"]
 
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -39,7 +41,7 @@ enum LandTiger3D {
             // Only the model files are extracted (never the emulator's DLLs), into a fresh folder.
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/bsdtar")
-            process.arguments = ["-xf", source.path, "-C", staging.path] + files.flatMap { ["--include", "*" + $0] }
+            process.arguments = ["-xf", source.path, "-C", staging.path] + (files + optionalFiles).flatMap { ["--include", "*" + $0] }
             process.standardError = Pipe()
             try process.run()
             process.waitUntilExit()
@@ -56,6 +58,11 @@ enum LandTiger3D {
             let to = target.appendingPathComponent(file)
             try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fm.copyItem(at: from, to: to)
+        }
+        for file in optionalFiles where fm.fileExists(atPath: docs.appendingPathComponent(file).path) {
+            let to = target.appendingPathComponent(file)
+            try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: docs.appendingPathComponent(file), to: to)
         }
     }
 
@@ -76,6 +83,12 @@ enum LandTiger3D {
         var buttons: [SIMD3<Float>] = []
         var joystick = SIMD3<Float>(0, 0, 0)
         var potentiometer = SIMD3<Float>(0, 0, 0)
+        /// Top face of the potentiometer knob: centre (y = its height) and radius.
+        var knob = SIMD3<Float>(0, 0, 0)
+        var knobRadius: Float = 0
+        /// Speaker grille: centre and radius (nil without SPEAKER/Model.obj).
+        var speaker: SIMD3<Float>?
+        var speakerRadius: Float = 0
     }
 
     /// Vertices of each object (`o` line) of an OBJ file.
@@ -132,7 +145,20 @@ enum LandTiger3D {
         }
         layout.buttons = clusters(part("BUTTONS/Model.obj"), gap: 0.004).map(center)
         layout.joystick = center(part("JOYSTICK/Model.obj"))
-        layout.potentiometer = center(part("POTMETER/Model.obj"))
+        let pot = part("POTMETER/Model.obj")
+        layout.potentiometer = center(pot)
+        if let top = pot.map(\.y).max() {
+            let face = pot.filter { $0.y > top - 0.002 }
+            let c = center(face)
+            layout.knob = c
+            layout.knobRadius = face.map { simd_length(SIMD2($0.x - c.x, $0.z - c.z)) }.max() ?? 0.01
+        }
+        let speaker = part("SPEAKER/Model.obj")
+        if let widest = clusters(speaker, gap: 0.004).max(by: { $0.count < $1.count }) {
+            let c = center(widest)
+            layout.speaker = c
+            layout.speakerRadius = widest.map { simd_length(SIMD2($0.x - c.x, $0.z - c.z)) }.max() ?? 0.03
+        }
         return layout
     }
 }

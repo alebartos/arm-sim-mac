@@ -16,6 +16,13 @@ final class LandTigerScene {
     private var ledNodes: [SCNNode] = []
     private var buttonMarks: [SCNNode] = []
     private var joystickMark = SCNNode()
+    /// Potentiometer: a white notch on the knob, turned from -135° (0) to +135° (full scale).
+    private let knobPivot = SCNNode()
+    /// Speaker: rings spreading from the grille while the DAC output changes.
+    private let speakerWaves = SCNNode()
+    private var lastDAC: Int?
+    private var lastSound = Date.distantPast
+    private var soundPlaying = false
     private var lastFrame: [UInt16]?
     /// The display module's texture atlas (2048²) and, in it, the glass of the TFT (top-left origin).
     private var atlas: CGImage?
@@ -97,10 +104,67 @@ final class LandTigerScene {
             buttonMarks.append(m)
         }
         joystickMark = mark(0.006)
+
+        if layout.knobRadius > 0 {
+            let length = CGFloat(layout.knobRadius) * 0.85
+            let notch = SCNNode(geometry: SCNBox(width: 0.0018, height: 0.0008, length: length, chamferRadius: 0.0003))
+            notch.geometry!.materials = [glow(NSColor(calibratedWhite: 0.95, alpha: 1))]
+            notch.position = SCNVector3(0, 0, -length / 2)   // from the centre towards the back of the board
+            knobPivot.addChildNode(notch)
+            knobPivot.position = SCNVector3(layout.knob.x, layout.knob.y + 0.0006, layout.knob.z)
+            scene.rootNode.addChildNode(knobPivot)
+        }
+        if let speaker = layout.speaker {
+            speakerWaves.position = SCNVector3(speaker.x, speaker.y + 0.002, speaker.z)
+            speakerWaves.isHidden = true
+            for i in 0..<3 {
+                let ring = SCNNode(geometry: SCNTorus(ringRadius: CGFloat(layout.speakerRadius) * 0.9, pipeRadius: 0.0009))
+                let m = glow(NSColor(calibratedRed: 0.35, green: 0.75, blue: 1, alpha: 1))
+                m.blendMode = .add
+                ring.geometry!.materials = [m]
+                ring.opacity = 0
+                ring.name = "wave\(i)"
+                speakerWaves.addChildNode(ring)
+            }
+            scene.rootNode.addChildNode(speakerWaves)
+        }
+    }
+
+    /// Knob position for the potentiometer value (0...1).
+    private func setPotentiometer(_ value: Double) {
+        knobPivot.eulerAngles.y = CGFloat(-(value - 0.5) * 1.5 * .pi)
+    }
+
+    /// Starts or stops the speaker rings: on while the DAC output keeps changing.
+    private func setSound(dac: Int?) {
+        guard layout.speaker != nil else { return }
+        if let dac, let last = lastDAC, dac != last { lastSound = Date() }
+        lastDAC = dac
+        let playing = Date().timeIntervalSince(lastSound) < 0.3
+        guard playing != soundPlaying else { return }
+        soundPlaying = playing
+        speakerWaves.isHidden = !playing
+        for (i, ring) in speakerWaves.childNodes.enumerated() {
+            ring.removeAllActions()
+            ring.opacity = 0
+            guard playing else { continue }
+            let wave = SCNAction.sequence([
+                .run { node in node.scale = SCNVector3(0.55, 1, 0.55); node.opacity = 0.9 },
+                .group([.scale(to: 1.6, duration: 0.9), .fadeOut(duration: 0.9)]),
+            ])
+            ring.runAction(.sequence([.wait(duration: 0.3 * Double(i)), .repeatForever(wave)]))
+        }
+        if playing {
+            // Stop by itself once the output stops changing (no further update may come).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.setSound(dac: self?.lastDAC) }
+        }
     }
 
     /// Board state: P2 pins / directions (LEDs), the TFT frame, held buttons (0 INT0, 1 KEY1, 2 KEY2) and joystick.
-    func update(pins: UInt32, direction: UInt32, frame: [UInt16]?, buttons: Set<Int>, joystick: Set<Int>) {
+    func update(pins: UInt32, direction: UInt32, frame: [UInt16]?, buttons: Set<Int>, joystick: Set<Int>,
+                potentiometer: Double = 0.5, dac: Int? = nil) {
+        setPotentiometer(potentiometer)
+        setSound(dac: dac)
         for (bit, node) in ledNodes.enumerated() {
             node.isHidden = !(direction & (1 << UInt32(bit)) != 0 && pins & (1 << UInt32(bit)) != 0)
         }
@@ -270,7 +334,8 @@ struct LandTiger3DView: NSViewRepresentable {
     func updateNSView(_ view: LandTigerSCNView, context: Context) {
         let s = debugger.snapshot
         view.board?.update(pins: s.gpioPins.count == 5 ? s.gpioPins[2] : 0, direction: s.gpioDirection.count == 5 ? s.gpioDirection[2] : 0,
-                           frame: debugger.lcdFrame, buttons: debugger.buttonsHeld, joystick: debugger.joystickHeld)
+                           frame: debugger.lcdFrame, buttons: debugger.buttonsHeld, joystick: debugger.joystickHeld,
+                           potentiometer: debugger.potentiometer, dac: debugger.lpc.map { Int($0.dac.value) })
     }
 }
 

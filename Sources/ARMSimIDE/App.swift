@@ -539,7 +539,12 @@ extension SmokeTest {
                 let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1000, height: 760), styleMask: [.titled], backing: .buffered, defer: false)
                 window.contentView = NSHostingView(rootView: LandTigerWindow())
                 window.orderFront(nil)
+                ws.removeAllBreakpoints()
                 ws.debugger.run()
+                // Turn the potentiometer meanwhile (the loudspeaker template plays when it changes).
+                for (i, value) in [0.2, 0.5, 0.8, 0.35, 0.9].enumerated() {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 + Double(i) * 0.7) { ws.debugger.setPotentiometer(value) }
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                     func find(_ v: NSView) -> LandTigerSCNView? { (v as? LandTigerSCNView) ?? v.subviews.lazy.compactMap(find).first }
                     if let view = window.contentView.flatMap(find) {
@@ -564,12 +569,15 @@ extension SmokeTest {
                 var frame = [UInt16](repeating: 0x001F, count: w * h)                 // blue
                 for y in 0..<40 { for x in 0..<60 { frame[y * w + x] = 0xF800 } }     // red: top-left corner
                 for y in (h - 20)..<h { for x in 0..<w { frame[y * w + x] = 0x07E0 } } // green: bottom rows
-                board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue])
+                board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue],
+                             potentiometer: 0.9, dac: 100)
+                board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue],
+                             potentiometer: 0.9, dac: 600)   // the DAC changed: speaker rings on
                 let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
                 renderer.scene = board.scene
                 renderer.pointOfView = board.camera
                 let size = CGSize(width: 1400, height: 1000)
-                let image = renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
+                let image = renderer.snapshot(atTime: 0.45, with: size, antialiasingMode: .multisampling4X)
                 if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
                     try? rep.representation(using: .png, properties: [:])?.write(to: output)
                 }
