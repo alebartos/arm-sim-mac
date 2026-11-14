@@ -532,6 +532,29 @@ extension SmokeTest {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6.5 : 2.5)) {
             // ARMSIM_SHOT_VIEW=gpio<n>|timer<n>: render that peripheral window instead of the main window.
+            // ARMSIM_SHOT_VIEW=landtiger3d (with --debug): the LandTiger window on its 3D tab while the program runs,
+            // captured from the SCNView after 4 s.
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] == "landtiger3d" {
+                UserDefaults.standard.set(true, forKey: "landTiger3D")
+                let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1000, height: 760), styleMask: [.titled], backing: .buffered, defer: false)
+                window.contentView = NSHostingView(rootView: LandTigerWindow())
+                window.orderFront(nil)
+                ws.debugger.run()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    func find(_ v: NSView) -> LandTigerSCNView? { (v as? LandTigerSCNView) ?? v.subviews.lazy.compactMap(find).first }
+                    if let view = window.contentView.flatMap(find) {
+                        let image = view.snapshot()
+                        if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
+                            try? rep.representation(using: .png, properties: [:])?.write(to: output)
+                        }
+                        FileHandle.standardError.write(Data("[shot] landtiger3d \(output.path) running \(ws.debugger.isRunning)\n".utf8))
+                    } else {
+                        FileHandle.standardError.write(Data("[shot] no 3D view (models imported: \(LandTiger3D.isInstalled))\n".utf8))
+                    }
+                    exit(0)
+                }
+                return
+            }
             // ARMSIM_SHOT_VIEW=board3d: the 3D LandTiger with test LEDs (0xA5) and a test TFT image, plus the
             // controls found under the projected buttons / joystick / TFT.
             if ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] == "board3d" {
