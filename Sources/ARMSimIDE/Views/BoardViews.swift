@@ -135,8 +135,21 @@ enum LCDImage {
 /// LandTiger board panel: LEDs on P2.0-P2.7 and the INT0 / KEY1 / KEY2 buttons (EINT0-2).
 struct LandTigerWindow: View {
     @ObservedObject var debugger = Workspace.shared.debugger
+    /// 2D panel or the 3D board (models imported from the LandTiger Emulator).
+    @AppStorage("landTiger3D") private var show3D = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $show3D) {
+                Text("2D").tag(false)
+                Text("3D").tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 120).padding(.top, 8)
+            if show3D { LandTiger3DPanel() } else { board2D }
+        }
+    }
+
+    @ViewBuilder private var board2D: some View {
         let pins = debugger.snapshot.gpioPins.count == 5 ? debugger.snapshot.gpioPins[2] : 0
         let dir = debugger.snapshot.gpioDirection.count == 5 ? debugger.snapshot.gpioDirection[2] : 0
         HStack(alignment: .top, spacing: 18) {

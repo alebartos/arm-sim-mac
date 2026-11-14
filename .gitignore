@@ -13,3 +13,6 @@ KeilScreens/
 
 # Local roadmap (not published)
 TODO.md
+
+# Third-party LandTiger Emulator (imported at runtime, never committed)
+emulatore/

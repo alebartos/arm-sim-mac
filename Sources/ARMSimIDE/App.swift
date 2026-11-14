@@ -1,5 +1,6 @@
 import AppKit
 import ARMCore
+import SceneKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -409,6 +410,15 @@ extension SmokeTest {
             window.setFrame(NSRect(x: 0, y: 0, width: size[0], height: size[1]), display: true)
         }
         ws.open(projectURL: project)
+        // ARMSIM_IMPORT_LANDTIGER=<emulator .rar / .zip / folder>: import the 3D board models first.
+        if let source = ProcessInfo.processInfo.environment["ARMSIM_IMPORT_LANDTIGER"] {
+            do {
+                try LandTiger3D.importModels(from: URL(fileURLWithPath: source))
+                FileHandle.standardError.write(Data("[shot] LandTiger 3D models imported: \(LandTiger3D.isInstalled)\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data("[shot] LandTiger 3D import failed: \(error)\n".utf8))
+            }
+        }
         // ARMSIM_SHOT_OPEN=relative/file.c[,other.s]: editor tabs to open (µVision reopens them from .uvguix).
         for file in (ProcessInfo.processInfo.environment["ARMSIM_SHOT_OPEN"] ?? "").split(separator: ",") {
             if let dir = ws.projectDirectory { ws.openDocument(dir.appendingPathComponent(String(file))) }
@@ -522,6 +532,39 @@ extension SmokeTest {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + (debug ? 6.5 : 2.5)) {
             // ARMSIM_SHOT_VIEW=gpio<n>|timer<n>: render that peripheral window instead of the main window.
+            // ARMSIM_SHOT_VIEW=board3d: the 3D LandTiger with test LEDs (0xA5) and a test TFT image, plus the
+            // controls found under the projected buttons / joystick / TFT.
+            if ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] == "board3d" {
+                func say(_ s: String) { FileHandle.standardError.write(Data("[shot] \(s)\n".utf8)) }
+                guard let board = LandTigerScene() else { say("no 3D models"); exit(1) }
+                let (w, h) = (LandTigerLCD.width, LandTigerLCD.height)
+                var frame = [UInt16](repeating: 0x001F, count: w * h)                 // blue
+                for y in 0..<40 { for x in 0..<60 { frame[y * w + x] = 0xF800 } }     // red: top-left corner
+                for y in (h - 20)..<h { for x in 0..<w { frame[y * w + x] = 0x07E0 } } // green: bottom rows
+                board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue])
+                let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+                renderer.scene = board.scene
+                renderer.pointOfView = board.camera
+                let size = CGSize(width: 1400, height: 1000)
+                let image = renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
+                if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
+                    try? rep.representation(using: .png, properties: [:])?.write(to: output)
+                }
+                say("layout leds \(board.layout.leds.count) buttons \(board.layout.buttons.count) joystick \(board.layout.joystick) pot \(board.layout.potentiometer)")
+                // Picking: project points to the view and hit test them as a click would.
+                var probes: [(String, SIMD3<Float>)] = board.layout.buttons.enumerated().map { ("button \($0.offset)", $0.element) }
+                let j = board.layout.joystick
+                probes += [("joystick center", j), ("joystick up", j + SIMD3(0, 0, -0.012)), ("joystick right", j + SIMD3(0.012, 0, 0)),
+                           ("potentiometer", board.layout.potentiometer), ("tft near top-left", SIMD3(-0.12, 0.06, -0.17)),
+                           ("tft center", SIMD3(-0.009, 0.06, 0.006))]
+                renderer.pointOfView = board.camera
+                for (name, p) in probes {
+                    let projected = renderer.projectPoint(SCNVector3(p.x, p.y, p.z))
+                    let hits = renderer.hitTest(CGPoint(x: projected.x, y: projected.y), options: [.searchMode: SCNHitTestSearchMode.closest.rawValue])
+                    say("\(name): \(hits.first.flatMap { board.control(at: $0) }.map { "\($0)" } ?? "-")")
+                }
+                exit(0)
+            }
             if let name = ProcessInfo.processInfo.environment["ARMSIM_SHOT_VIEW"] {
                 let index = Int(name.filter(\.isNumber)) ?? 0
                 let view: AnyView

@@ -30,13 +30,19 @@ It has been tested mainly on the LPC1768 / LandTiger projects of the Politecnico
 - Cortex-M0, M3 and M4 cores (Thumb and Thumb-2), with exceptions, NVIC and SysTick. About 65 million instructions per second on Apple silicon.
 - On the M4: the FPv4-SP FPU and the DSP extension.
 - LPC17xx peripherals: SC/PLL, GPIO, TIMER0-3, RIT, EINT, UART, ADC, DAC, PWM1 and CAN1/CAN2.
-- LandTiger board: LEDs, buttons, joystick, potentiometer, speaker, TFT display and touch panel.
+- LandTiger board: LEDs, buttons, joystick, potentiometer, speaker, TFT display and touch panel, as a 2D panel or a 3D board (see below).
 
 ### Debugger
 - Windows: Registers, Disassembly, Memory, Watch with typed DWARF variables, Call Stack + Locals, Symbols (with the Special Function Registers), Command, Logic Analyzer (with Jump to Code), Code Coverage and peripheral windows.
 - µVision debug scripts (`.ini`): `FUNC` and `SIGNAL` functions, `DEFINE BUTTON` (Toolbox window) and VTREGs such as `PORT2` and `AIN5`.
 - "Start Debug Session with Keil Image" debugs an `.axf` built by µVision, without rebuilding it.
 - Debugging through a GDB server instead of the simulator (see below).
+
+### 3D LandTiger board
+
+The LandTiger window has a **3D** tab that shows the board as the course's LandTiger Emulator does: the TFT shows the simulated display, LD4-LD11 light up, and you click the buttons, the joystick and the touch panel and drag the potentiometer. Drag the board to turn it and scroll to zoom.
+
+The 3D models belong to the LandTiger Emulator (Politecnico di Torino, Gabriele and Federico Filipponi) and are not included in ARM Sim. Click **Import from LandTiger Emulator…** and choose your copy of `emulatore_v1.2.3.rar` (or the folder extracted from it). Only the model files are copied, into `~/Library/Application Support/ARM Sim/LandTiger3D`.
 
 ### Debug a board or QEMU
 
