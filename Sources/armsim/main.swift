@@ -11,7 +11,7 @@ usage: armsim [options] <program.elf | program.o | program.bin>
   --base <addr>          load address for .o (default 0x20000000) and .bin (default 0x0)
   --max <n>              stop after n instructions (default 100000000)
   --break <addr|symbol>  add a breakpoint (repeatable)
-  --trace                print every executed instruction address
+  --trace                print every executed instruction address and the cycle count before it
   --no-semihost          treat BKPT 0xAB as a normal breakpoint
   --axf <file>           write the linked image as an ELF executable
   --rom <base:size>      ROM (IROM1) for linking several objects, e.g. 0x0:0x80000
@@ -174,7 +174,11 @@ if paths.count > 1 || layoutGiven {
 sim.cpu.semihostingEnabled = semihosting
 
 do {
-    if paths.count > 1 || layoutGiven {
+    if paths.count == 1 && layoutGiven && bytes.count > 17 && bytes[0] == 0x7F && bytes[16] == 2 {
+        // A linked image (e.g. a Keil .axf) in the given ROM / RAM layout: reset from its vector table.
+        let image = try sim.loadELF(bytes)
+        try sim.reset(vectorTable: image.lowestAddress ?? 0)
+    } else if paths.count > 1 || layoutGiven {
         let objects = paths.map { (name: ($0 as NSString).lastPathComponent, bytes: readFile($0)) }
         let image = try Linker.link(objects: objects, layout: LinkLayout(
             romBase: romArea.0, romSize: romArea.1, ramBase: ramArea.0, ramSize: ramArea.1),
@@ -228,7 +232,7 @@ if trace {
     while count < maxInstructions {
         let pc = sim.cpu.pc
         let label = sim.image?.symbol(containing: pc).map { " <\($0.name)+0x\(String(pc - $0.address, radix: 16))>" } ?? ""
-        print(String(format: "0x%08X%@", pc, label))
+        print(String(format: "0x%08X %llu%@", pc, sim.cpu.cycles, label))
         reason = sim.cpu.run(maxInstructions: 1)
         count += 1
         if reason != .instructionLimit { break }

@@ -191,7 +191,7 @@ extension CPU {
                 try requireThumb2()
                 let cond = (h1 >> 6) & 0xF
                 let imm = signExtend((s << 20) | (j2 << 19) | (j1 << 18) | ((h1 & 0x3F) << 12) | (imm11 << 1), 21)
-                if conditionPassed(cond) { nextPC = curPC &+ 4 &+ imm }
+                if conditionPassed(cond) { branchTo(curPC &+ 4 &+ imm) }
                 return
             }
             switch op {
@@ -220,7 +220,7 @@ extension CPU {
             } else {
                 try requireThumb2()
             }
-            nextPC = curPC &+ 4 &+ imm
+            branchTo(curPC &+ 4 &+ imm)
 
         default:
             throw UndefinedInstruction() // BLX (immediate) does not exist on M profile
@@ -299,7 +299,7 @@ extension CPU {
                 let offset = half
                     ? try ld(R(rn) &+ (index << 1), 2)
                     : try ld(R(rn) &+ index, 1)
-                nextPC = curPC &+ 4 &+ (offset << 1)
+                branchTo(curPC &+ 4 &+ (offset << 1))
             case 0b0100: // LDREXB
                 W(rt, try ld(R(rn), 1))
                 exclusiveMonitor = true

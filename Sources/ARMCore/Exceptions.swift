@@ -266,7 +266,10 @@ extension CPU {
         exclusiveMonitor = false
         r[14] = excReturn
         r[15] = vector & ~1
-        cycles &+= 12
+        // µVision counts the entry overlapped with the instruction during which the exception was taken: that
+        // instruction + entry = 11 states (SVC 1 + 10, LDR / STR 2 + 9; measured).
+        cycles &+= 11 - min(lastInstructionCycles, 10)
+        lastInstructionCycles = 0
     }
 
     /// Unstack after a branch to EXC_RETURN in handler mode.
@@ -495,7 +498,11 @@ public final class SystemControlSpace: MMIODevice {
         guard let cpu else { return }
         let s = cpu.system
         switch offset {
-        case 0x010: s.sysTickCSR = (s.sysTickCSR & (1 << 16)) | (value & 7)
+        case 0x010:
+            // Enabling loads the counter at once (µVision: VAL = LOAD right after the enabling store, whose own
+            // cycles are not counted; see CPU.step).
+            if s.sysTickCSR & 1 == 0 && value & 1 != 0 && s.sysTickCurrent == 0 { s.sysTickCurrent = s.sysTickReload & 0x00FF_FFFF }
+            s.sysTickCSR = (s.sysTickCSR & (1 << 16)) | (value & 7)
         case 0x014: s.sysTickReload = value & 0x00FF_FFFF
         case 0x018: // any write clears the counter and COUNTFLAG
             s.sysTickCurrent = 0

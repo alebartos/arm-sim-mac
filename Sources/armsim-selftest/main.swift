@@ -529,7 +529,7 @@ let asmTests: [AsmTest] = [
         .word 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     """, expect: ["r4": 0x0001_0000, "r6": 0x4000_0000, "r5": 1, "spDelta": 0]),
 
-    AsmTest(name: "cycles: loop with taken BNE (1+P), LDR 2, pipelined LDR/STR 1", body: """
+    AsmTest(name: "cycles (as µVision): taken BNE 3, not taken 1, LDR / STR 2", body: """
         movs r0, #4
     1:  subs r0, #1
         bne 1b
@@ -537,9 +537,9 @@ let asmTests: [AsmTest] = [
         ldr r2, [r1]
         str r2, [r1, #4]
         nop
-    """, expect: ["cycles": 1 + 4 + 3 * 2 + 1 + 2 + 1 + 1 + 1 + 1]),
+    """, expect: ["cycles": 1 + 4 + 3 * 3 + 1 + 2 + 2 + 2 + 1 + 1]),
 
-    AsmTest(name: "cycles: BL / BX LR (1+P), PUSH/POP 1+N, MLA 2, UDIV early termination", body: """
+    AsmTest(name: "cycles (as µVision): BL 3, PUSH 1+N, UDIV 100/7 6, POP {PC} 3+N, MLA 2, B 3", body: """
         movs r0, #100
         movs r1, #7
         bl 2f
@@ -549,7 +549,7 @@ let asmTests: [AsmTest] = [
         udiv r2, r0, r1
         pop {r4, pc}
     3:  nop
-    """, expect: ["r2": 14, "r3": 800, "cycles": 1 + 1 + 2 + (3 + 4 + (3 + 1)) + 2 + 2 + 1 + 1], only: "m3"),
+    """, expect: ["r2": 14, "r3": 800, "cycles": 1 + 1 + 3 + (3 + 6 + 5) + 2 + 3 + 1 + 1], only: "m3"),
 
     AsmTest(name: "LDM faulting on its last word leaves the registers unchanged (BusFault -> HardFault)", body: """
         ldr r0, =0xE000ED08

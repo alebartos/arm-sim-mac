@@ -103,11 +103,11 @@ extension CPU {
                 supervisorCall()
                 event = .svc(UInt8(i & 0xFF))
             default:
-                if conditionPassed(cond) { nextPC = curPC &+ 4 &+ signExtend((i & 0xFF) << 1, 9) }
+                if conditionPassed(cond) { branchTo(curPC &+ 4 &+ signExtend((i & 0xFF) << 1, 9)) }
             }
 
         case 0b11100: // B
-            nextPC = curPC &+ 4 &+ signExtend((i & 0x7FF) << 1, 12)
+            branchTo(curPC &+ 4 &+ signExtend((i & 0x7FF) << 1, 12))
 
         default:
             throw UndefinedInstruction()
@@ -184,7 +184,7 @@ extension CPU {
             let rn = i & 7
             let imm = (((i >> 9) & 1) << 6) | (((i >> 3) & 0x1F) << 1)
             let nonZero = i & 0x800 != 0
-            if (R(rn) != 0) == nonZero { nextPC = curPC &+ 4 &+ imm }
+            if (R(rn) != 0) == nonZero { branchTo(curPC &+ 4 &+ imm) }
 
         case 0b0010: // SXTH, SXTB, UXTH, UXTB
             let rd = i & 7, m = R((i >> 3) & 7)
