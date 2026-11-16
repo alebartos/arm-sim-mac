@@ -24,6 +24,8 @@ final class LandTigerScene {
     private var lastSound = Date.distantPast
     private var soundPlaying = false
     private var lastFrame: [UInt16]?
+    /// Jumper caps: per jumper, one node per state (the caps of that position).
+    private var jumperCaps: [String: [SCNNode]] = [:]
     /// The display module's texture atlas (2048²) and, in it, the glass of the TFT (top-left origin).
     private var atlas: CGImage?
     static let atlasSize = 2048
@@ -128,6 +130,40 @@ final class LandTigerScene {
             }
             scene.rootNode.addChildNode(speakerWaves)
         }
+
+        // Jumper caps over the header pins (the model has only the pins): one group per position.
+        let capMaterial = SCNMaterial()
+        capMaterial.lightingModel = .blinn
+        capMaterial.diffuse.contents = NSColor(calibratedRed: 0.78, green: 0.12, blue: 0.1, alpha: 1)
+        capMaterial.specular.contents = NSColor(calibratedWhite: 0.5, alpha: 1)
+        let bottom = LandTiger3D.jumperBaseTop + 0.0005, top = LandTiger3D.jumperPinTop + 0.003
+        for jumper in LandTiger3D.jumpers {
+            jumperCaps[jumper.name] = jumper.states.map { caps in
+                let group = SCNNode()
+                for (a, b) in caps {
+                    let pa = jumper.pins[a], pb = jumper.pins[b]
+                    let box = SCNBox(width: 0.0112, height: CGFloat(top - bottom), length: CGFloat(simd_length(pb - pa)) + 0.0112,
+                                     chamferRadius: 0.0012)
+                    box.materials = [capMaterial]
+                    let cap = SCNNode(geometry: box)
+                    let mid = (pa + pb) / 2
+                    cap.position = SCNVector3(mid.x, (top + bottom) / 2, mid.y)
+                    cap.eulerAngles.y = CGFloat(atan2(pb.x - pa.x, pb.y - pa.y))   // box length runs along z
+                    group.addChildNode(cap)
+                }
+                group.isHidden = true
+                scene.rootNode.addChildNode(group)
+                return group
+            }
+        }
+    }
+
+    /// Shows the caps of each jumper's position.
+    private func setJumpers(_ states: [String: Int]) {
+        for jumper in LandTiger3D.jumpers {
+            let state = states[jumper.name] ?? jumper.defaultState
+            for (i, group) in (jumperCaps[jumper.name] ?? []).enumerated() { group.isHidden = i != state }
+        }
     }
 
     /// Knob position for the potentiometer value (0...1).
@@ -161,12 +197,15 @@ final class LandTigerScene {
     }
 
     /// Board state: P2 pins / directions (LEDs), the TFT frame, held buttons (0 INT0, 1 KEY1, 2 KEY2) and joystick.
+    /// Jumpers: JP8 removed turns the LEDs off, JP2 removed silences the speaker.
     func update(pins: UInt32, direction: UInt32, frame: [UInt16]?, buttons: Set<Int>, joystick: Set<Int>,
-                potentiometer: Double = 0.5, dac: Int? = nil) {
+                potentiometer: Double = 0.5, dac: Int? = nil, jumpers: [String: Int] = LandTiger3D.defaultJumperStates) {
         setPotentiometer(potentiometer)
-        setSound(dac: dac)
+        setJumpers(jumpers)
+        setSound(dac: jumpers["JP2"] == 0 ? nil : dac)
+        let ledsOn = jumpers["JP8"] != 0
         for (bit, node) in ledNodes.enumerated() {
-            node.isHidden = !(direction & (1 << UInt32(bit)) != 0 && pins & (1 << UInt32(bit)) != 0)
+            node.isHidden = !(ledsOn && direction & (1 << UInt32(bit)) != 0 && pins & (1 << UInt32(bit)) != 0)
         }
         if frame != lastFrame {
             lastFrame = frame
@@ -224,6 +263,7 @@ final class LandTigerScene {
         case joystick(LPC17xx.Joystick)
         case potentiometer
         case touch(x: Int, y: Int)
+        case jumper(String)
     }
 
     /// The control under a hit on the board.
@@ -242,6 +282,9 @@ final class LandTigerScene {
         let w = hit.worldCoordinates
         let p = SIMD3<Float>(Float(w.x), Float(w.y), Float(w.z))
         func flat(_ a: SIMD3<Float>) -> Float { simd_length(SIMD2(a.x - p.x, a.z - p.z)) }
+        for jumper in LandTiger3D.jumpers where jumper.pins.contains(where: { simd_length($0 - SIMD2(p.x, p.z)) < 0.0085 }) {
+            return .jumper(jumper.name)
+        }
         if let (i, b) = layout.buttons.enumerated().min(by: { flat($0.element) < flat($1.element) }).map({ ($0.offset, $0.element) }),
            flat(b) < 0.016 {
             return i < 3 ? .button(eint: [1, 2, 0][i]) : .reset
@@ -312,6 +355,10 @@ final class LandTigerSCNView: SCNView {
         case .joystick(let d): debugger.setJoystick(d, pressed: true)
         case .touch(let x, let y): debugger.setTouch((x: x, y: y))
         case .potentiometer: break
+        case .jumper(let name):
+            // Each click moves the jumper to its next position (inserted / removed, 1-2 / 2-3).
+            let count = LandTiger3D.jumpers.first { $0.name == name }?.states.count ?? 2
+            debugger.setJumper(name, state: ((debugger.jumpers[name] ?? 0) + 1) % count)
         }
     }
 }
@@ -335,7 +382,7 @@ struct LandTiger3DView: NSViewRepresentable {
         let s = debugger.snapshot
         view.board?.update(pins: s.gpioPins.count == 5 ? s.gpioPins[2] : 0, direction: s.gpioDirection.count == 5 ? s.gpioDirection[2] : 0,
                            frame: debugger.lcdFrame, buttons: debugger.buttonsHeld, joystick: debugger.joystickHeld,
-                           potentiometer: debugger.potentiometer, dac: debugger.lpc.map { Int($0.dac.value) })
+                           potentiometer: debugger.potentiometer, dac: debugger.lpc.map { Int($0.dac.value) }, jumpers: debugger.jumpers)
     }
 }
 
@@ -350,7 +397,9 @@ struct LandTiger3DPanel: View {
         if installed {
             VStack(spacing: 4) {
                 LandTiger3DView(debugger: debugger)
-                Text("Click the buttons, joystick and TFT; drag the potentiometer sideways. Drag the board to turn it, scroll to zoom.")
+                Text("Click the buttons, joystick, TFT and jumpers; drag the potentiometer sideways. Drag the board to turn it, scroll to zoom.")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+                Text(LandTiger3D.jumperSummary(debugger.jumpers))
                     .font(.system(size: 10)).foregroundColor(.secondary)
             }
             .frame(minWidth: 800, minHeight: 560)

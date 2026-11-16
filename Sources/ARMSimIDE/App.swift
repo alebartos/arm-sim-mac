@@ -254,6 +254,7 @@ extension SmokeTest {
         say("imported: \(ws.project.map { "\($0.name), device \($0.options.device), groups \($0.groups.map(\.name)), files \($0.groups.flatMap(\.files))" } ?? "nil")")
         let useKeil = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_KEIL"] != nil
         if let pot = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_POT"].flatMap(Double.init) { d.potentiometer = pot }
+        if let list = ProcessInfo.processInfo.environment["ARMSIM_SMOKE_JUMPERS"] { d.jumpers = LandTiger3D.jumperStates(list) }
         say("keil image: \(ws.keilImageURL?.path ?? "none")")
         say("uvoptx: \(ws.breakpoints.count) breakpoints \(ws.breakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted()), watch \(d.watchExpressions), memory \(UserDefaults.standard.string(forKey: "memoryAddress") ?? "-"), run to main \(ws.project?.options.runToMain ?? false), ini \(ws.project?.options.debugIniFile ?? "-")")
         say("uvoptx disabled: \(ws.disabledBreakpoints.map { "\(($0.path as NSString).lastPathComponent):\($0.line)" }.sorted())")
@@ -571,8 +572,10 @@ extension SmokeTest {
                 for y in (h - 20)..<h { for x in 0..<w { frame[y * w + x] = 0x07E0 } } // green: bottom rows
                 board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue],
                              potentiometer: 0.9, dac: 100)
+                let jumpers = LandTiger3D.jumperStates(ProcessInfo.processInfo.environment["ARMSIM_SHOT_JUMPERS"])
                 board.update(pins: 0xA5, direction: 0xFF, frame: frame, buttons: [1], joystick: [LPC17xx.Joystick.up.rawValue],
-                             potentiometer: 0.9, dac: 600)   // the DAC changed: speaker rings on
+                             potentiometer: 0.9, dac: 600, jumpers: jumpers)   // the DAC changed: speaker rings on
+                say("jumpers \(jumpers.sorted { $0.key.count == $1.key.count ? $0.key < $1.key : $0.key.count < $1.key.count }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))")
                 let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
                 renderer.scene = board.scene
                 renderer.pointOfView = board.camera
@@ -588,6 +591,7 @@ extension SmokeTest {
                 probes += [("joystick center", j), ("joystick up", j + SIMD3(0, 0, -0.012)), ("joystick right", j + SIMD3(0.012, 0, 0)),
                            ("potentiometer", board.layout.potentiometer), ("tft near top-left", SIMD3(-0.12, 0.06, -0.17)),
                            ("tft center", SIMD3(-0.009, 0.06, 0.006))]
+                probes += LandTiger3D.jumpers.map { j in ("jumper \(j.name)", SIMD3(j.pins[0].x, LandTiger3D.jumperPinTop, j.pins[0].y)) }
                 renderer.pointOfView = board.camera
                 for (name, p) in probes {
                     let projected = renderer.projectPoint(SCNVector3(p.x, p.y, p.z))

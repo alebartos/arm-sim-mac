@@ -74,6 +74,85 @@ enum LandTiger3D {
         return nil
     }
 
+    // MARK: Jumpers
+
+    /// A jumper header of the board. Its states list the pin pairs covered by caps (an empty list: removed).
+    struct Jumper {
+        let name: String
+        /// Silkscreen label and what the jumper does.
+        let label: String
+        let help: String
+        /// Pin centres on the board plane (x, z), read from the headers of the board model.
+        let pins: [SIMD2<Float>]
+        let states: [[(Int, Int)]]
+        let defaultState: Int
+        /// Names of the states, for the caption.
+        let stateNames: [String]
+    }
+
+    /// Top of the header pins and of their plastic base (model units).
+    static let jumperPinTop: Float = 0.019
+    static let jumperBaseTop: Float = -0.0105
+    /// Pin pitch (2.54 mm in model units).
+    static let jumperPitch: Float = 0.01215
+
+    static let jumpers: [Jumper] = {
+        let p = jumperPitch / 2
+        func twoPin(_ name: String, _ label: String, _ help: String, x: Float, z: Float, alongX: Bool, on: Bool) -> Jumper {
+            let pins = alongX ? [SIMD2(x - p, z), SIMD2(x + p, z)] : [SIMD2(x, z - p), SIMD2(x, z + p)]
+            return Jumper(name: name, label: label, help: help, pins: pins, states: [[], [(0, 1)]], defaultState: on ? 1 : 0,
+                          stateNames: ["removed", "inserted"])
+        }
+        func threePin(_ name: String, _ label: String, _ help: String, x: Float, z: Float, alongX: Bool, names: [String], state: Int) -> Jumper {
+            let d = jumperPitch
+            let pins = alongX ? [SIMD2(x - d, z), SIMD2(x, z), SIMD2(x + d, z)] : [SIMD2(x, z - d), SIMD2(x, z), SIMD2(x, z + d)]
+            return Jumper(name: name, label: label, help: help, pins: pins, states: [[(0, 1)], [(1, 2)]], defaultState: state, stateNames: names)
+        }
+        func twoByTwo(_ name: String, _ label: String, _ help: String, x: Float, z: Float) -> Jumper {
+            let pins = [SIMD2(x - p, z - p), SIMD2(x - p, z + p), SIMD2(x + p, z - p), SIMD2(x + p, z + p)]
+            return Jumper(name: name, label: label, help: help, pins: pins, states: [[], [(0, 1), (2, 3)]], defaultState: 1,
+                          stateNames: ["removed", "inserted"])
+        }
+        return [
+            twoPin("JP1", "JP1", "backup battery to the RTC (VBAT)", x: -0.2561, z: -0.02935, alongX: false, on: true),
+            twoPin("JP2", "SPK", "speaker on AOUT (P0.26)", x: 0.17035, z: 0.1632, alongX: true, on: true),
+            threePin("JP3", "PWR_JUMP", "power from the 5 V jack (1-2) or USB (2-3)", x: 0.33505, z: -0.22385, alongX: false,
+                     names: ["1-2 (5 V jack)", "2-3 (USB)"], state: 1),
+            twoPin("JP4", "JTAG SEL", "external JTAG instead of the on-board J-Link", x: -0.2918, z: -0.02935, alongX: false, on: false),
+            twoPin("JP5", "INT0", "INT0 (P2.10) for manual ISP entry", x: -0.2205, z: -0.02935, alongX: false, on: true),
+            twoPin("JP6", "ISP", "ISP select by the serial port (RTS)", x: -0.2383, z: -0.02935, alongX: false, on: false),
+            twoPin("JP7", "RST", "reset by the serial port (DTR)", x: -0.27395, z: -0.02935, alongX: false, on: false),
+            twoPin("JP8", "LED", "LD4-LD11 on P2.0-P2.7", x: 0.17035, z: 0.191, alongX: true, on: true),
+            twoByTwo("JP9", "D+", "USB device D+", x: 0.27865, z: 0.06905),
+            threePin("JP10", "USB_CONNECT", "USB soft connect", x: 0.20135, z: 0.0437, alongX: true, names: ["1-2", "2-3"], state: 0),
+            twoByTwo("JP11", "D-", "USB device D-", x: 0.24505, z: 0.06905),
+            twoPin("JP12", "ADC", "potentiometer VR1 on AD0.5 (P1.31)", x: -0.3396, z: 0.1306, alongX: true, on: true),
+        ]
+    }()
+
+    static var defaultJumperStates: [String: Int] {
+        Dictionary(uniqueKeysWithValues: jumpers.map { ($0.name, $0.defaultState) })
+    }
+
+    /// Default positions changed by a "JP8=0,JP3=0" list (ARMSIM_SHOT_JUMPERS / ARMSIM_SMOKE_JUMPERS).
+    static func jumperStates(_ list: String?) -> [String: Int] {
+        var states = defaultJumperStates
+        for item in (list ?? "").split(separator: ",") {
+            let kv = item.split(separator: "=")
+            if kv.count == 2, states[String(kv[0])] != nil, let v = Int(kv[1]) { states[String(kv[0])] = v }
+        }
+        return states
+    }
+
+    /// Caption: the jumpers that change the simulation (JP8, JP2, JP12) and their position.
+    static func jumperSummary(_ states: [String: Int]) -> String {
+        ["JP8", "JP2", "JP12"].compactMap { name in
+            jumpers.first { $0.name == name }.map { j in
+                "\(j.name) \(j.label) \(j.stateNames[states[name] ?? j.defaultState]) (\(j.help))"
+            }
+        }.joined(separator: " · ")
+    }
+
     // MARK: Component positions (read from the models: board plane x-z, y up)
 
     struct Layout {

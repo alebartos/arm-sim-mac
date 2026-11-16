@@ -157,7 +157,7 @@ struct LandTigerWindow: View {
             Text("LandTiger LPC1768").font(.system(size: 13, weight: .semibold))
             HStack(spacing: 10) {
                 ForEach((0..<8).reversed(), id: \.self) { bit in
-                    let lit = dir & (1 << UInt32(bit)) != 0 && pins & (1 << UInt32(bit)) != 0
+                    let lit = debugger.ledsEnabled && dir & (1 << UInt32(bit)) != 0 && pins & (1 << UInt32(bit)) != 0
                     VStack(spacing: 3) {
                         Circle()
                             .fill(lit ? Color(red: 1, green: 0.15, blue: 0.1) : Color(white: 0.85))
@@ -207,6 +207,16 @@ struct LandTigerWindow: View {
                 }
                 .frame(width: 170, height: 8)
                 Text(String(format: "%.2f V", dac * 3.3)).font(.system(size: 10, design: .monospaced)).frame(width: 44, alignment: .leading)
+            }
+            HStack(spacing: 14) {
+                Text("Jumpers").font(.system(size: 10, weight: .semibold))
+                ForEach(["JP8", "JP2", "JP12"], id: \.self) { name in
+                    if let j = LandTiger3D.jumpers.first(where: { $0.name == name }) {
+                        Toggle("\(j.name) \(j.label)", isOn: Binding(get: { debugger.jumpers[name] != 0 },
+                                                                    set: { debugger.setJumper(name, state: $0 ? 1 : 0) }))
+                            .toggleStyle(.checkbox).font(.system(size: 10)).help(j.help)
+                    }
+                }
             }
             Text("Hold a button to keep it pressed. Buttons raise EINT0-2 when P2.10-12 are configured as EINT in PINSEL4, otherwise they drive the GPIO input low.")
                 .font(.system(size: 10)).foregroundColor(.secondary).multilineTextAlignment(.center)

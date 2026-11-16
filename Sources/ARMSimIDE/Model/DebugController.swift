@@ -112,9 +112,26 @@ final class DebugController: ObservableObject {
     func setPotentiometer(_ value: Double) {
         potentiometer = min(max(value, 0), 1)
         guard let lpc else { return }
-        let raw = UInt16((potentiometer * 4095).rounded())
+        let raw = potentiometerInput
         inject { lpc.adc.inputs[5] = raw }
     }
+
+    /// AD0.5 input: the potentiometer, or 0 with JP12 removed (VR1 disconnected).
+    private var potentiometerInput: UInt16 {
+        jumpers["JP12"] == 0 ? 0 : UInt16((potentiometer * 4095).rounded())
+    }
+
+    /// LandTiger jumper positions by name (JP1...JP12, `LandTiger3D.jumpers`). JP8 enables the LEDs, JP2 the
+    /// speaker and JP12 connects the potentiometer to AD0.5; the others only change the picture.
+    @Published var jumpers = LandTiger3D.defaultJumperStates
+
+    func setJumper(_ name: String, state: Int) {
+        jumpers[name] = state
+        if name == "JP12" { setPotentiometer(potentiometer) }
+    }
+
+    var ledsEnabled: Bool { jumpers["JP8"] != 0 }
+    var speakerEnabled: Bool { jumpers["JP2"] != 0 }
 
     func setButton(_ index: Int, pressed: Bool) {
         if pressed { buttonsHeld.insert(index) } else { buttonsHeld.remove(index) }
@@ -280,7 +297,7 @@ final class DebugController: ObservableObject {
         sim.cpu.hasFPU = product.device.hasFPU && o.useFPU == true
         // Behavioural peripheral models where available (LandTiger / LPC17xx)...
         lpc = product.device.name.uppercased().hasPrefix("LPC17") ? LPC17xx.install(on: sim) : nil
-        lpc?.adc.inputs[5] = UInt16((potentiometer * 4095).rounded())
+        lpc?.adc.inputs[5] = potentiometerInput
         lpc?.systemControl.crystalHz = o.xtalMHz * 1_000_000
         DispatchQueue.main.async { self.lcdFrame = nil } // published: main thread only
         lcdFrameCount = .max
