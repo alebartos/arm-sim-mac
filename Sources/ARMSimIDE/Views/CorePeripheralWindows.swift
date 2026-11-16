@@ -51,7 +51,7 @@ struct NVICWindow: View {
     private func names(_ n: Int) -> (String, String) {
         if let s = Self.system[n] { return s }
         let irq = n - 16
-        if debugger.lpc != nil, irq < Self.lpc.count { return Self.lpc[irq] }
+        if debugger.hasLPC17xxRegisters, irq < Self.lpc.count { return Self.lpc[irq] }
         return ("Interrupt \(irq)", "IRQ\(irq)")
     }
 

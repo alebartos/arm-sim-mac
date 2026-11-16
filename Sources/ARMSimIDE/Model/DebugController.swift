@@ -130,6 +130,9 @@ final class DebugController: ObservableObject {
         if name == "JP12" { setPotentiometer(potentiometer) }
     }
 
+    /// LPC17xx register windows (GPIO, timers, NVIC names): simulated, or a remote LPC17xx target.
+    var hasLPC17xxRegisters: Bool { lpc != nil || remoteIsLPC17xx }
+
     var ledsEnabled: Bool { jumpers["JP8"] != 0 }
     var speakerEnabled: Bool { jumpers["JP2"] != 0 }
 

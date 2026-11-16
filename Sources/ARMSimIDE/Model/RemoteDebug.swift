@@ -216,6 +216,7 @@ extension DebugController {
             s.control = (try? gdb.readRegister("control")) ?? 0
             s.ipsr = s.xpsr & 0x1FF
             location = product?.debugInfo.lineByAddress[s.r[15]]
+            readRemotePeripherals(gdb, into: &s)
         }
         DispatchQueue.main.async {
             self.previous = self.snapshot
@@ -224,6 +225,55 @@ extension DebugController {
             self.isRunning = false
             if let stopMessage { self.log(stopMessage) }
             self.revision &+= 1
+        }
+    }
+
+    /// Device of the remote target has the LPC17xx register map (GPIO / timer / NVIC windows).
+    var remoteIsLPC17xx: Bool { remote != nil && product?.device.name.uppercased().hasPrefix("LPC17") == true }
+
+    /// SysTick, fault status, NVIC and (LPC17xx) GPIO registers of the target, for the peripheral windows, as the
+    /// simulator's snapshot has them. Unreadable blocks leave their fields empty.
+    private func readRemotePeripherals(_ gdb: GDBRemote, into s: inout CPUSnapshot) {
+        func words(_ address: UInt32, _ count: Int) -> [UInt32]? {
+            guard let bytes = try? gdb.readMemory(address, count: count * 4), bytes.count == count * 4 else { return nil }
+            return (0..<count).map { i in (0..<4).reduce(UInt32(0)) { $0 | UInt32(bytes[i * 4 + $1]) << (8 * UInt32($1)) } }
+        }
+        if let t = words(0xE000_E010, 3) { (s.sysTickCSR, s.sysTickReload, s.sysTickCurrent) = (t[0], t[1], t[2]) }
+        if let f = words(0xE000_ED28, 5) { (s.cfsr, s.hfsr, s.bfar) = (f[0], f[1], f[4]) }
+        // NVIC: system exceptions from ICSR / SHCSR / SHPR, interrupts from ISER / ISPR / IABR / IPR.
+        let lpc = remoteIsLPC17xx
+        let irqs = lpc ? 35 : (words(0xE000_E004, 1).map { Int($0[0] & 0xF + 1) * 32 } ?? 32)
+        let bits = lpc ? 5 : (product?.device.architecture == .armv6m ? 2 : 4)
+        let regs = (irqs + 31) / 32
+        if let iser = words(0xE000_E100, regs), let ispr = words(0xE000_E200, regs), let iabr = words(0xE000_E300, regs),
+           let ipr = try? gdb.readMemory(0xE000_E400, count: irqs), ipr.count == irqs,
+           let scb = words(0xE000_ED04, 1), let shpr = try? gdb.readMemory(0xE000_ED18, count: 12), shpr.count == 12,
+           let shcsrWord = words(0xE000_ED24, 1) {
+            let icsr = scb[0], shcsr = shcsrWord[0]
+            func bit(_ v: UInt32, _ n: Int) -> Bool { v & (1 << UInt32(n)) != 0 }
+            let systemEnabled: [Int: Bool] = [4: bit(shcsr, 16), 5: bit(shcsr, 17), 6: bit(shcsr, 18)]
+            let systemPending: [Int: Bool] = [2: bit(icsr, 31), 4: bit(shcsr, 13), 5: bit(shcsr, 14), 6: bit(shcsr, 12),
+                                              11: bit(shcsr, 15), 14: bit(icsr, 28), 15: bit(icsr, 26)]
+            let systemActive: [Int: Bool] = [3: s.ipsr == 3, 2: s.ipsr == 2, 4: bit(shcsr, 0), 5: bit(shcsr, 1), 6: bit(shcsr, 3),
+                                             11: bit(shcsr, 7), 12: bit(shcsr, 8), 14: bit(shcsr, 10), 15: bit(shcsr, 11)]
+            s.nvic = (1..<(16 + irqs)).map { n in
+                if n < 16 {
+                    let priority = n >= 4 ? Int(shpr[n - 4]) >> (8 - bits) : 0   // fixed -3...-1, shown by the window
+                    return CPUSnapshot.NVICEntry(number: n, enabled: systemEnabled[n] ?? true, pending: systemPending[n] ?? false,
+                                                 active: systemActive[n] ?? false, priority: priority)
+                }
+                let i = n - 16
+                return CPUSnapshot.NVICEntry(number: n, enabled: bit(iser[i / 32], i % 32), pending: bit(ispr[i / 32], i % 32),
+                                             active: bit(iabr[i / 32], i % 32), priority: Int(ipr[i]) >> (8 - bits))
+            }
+        }
+        if lpc {
+            var dir: [UInt32] = [], mask: [UInt32] = [], out: [UInt32] = [], pins: [UInt32] = []
+            for port in 0..<5 {
+                guard let g = words(0x2009_C000 + UInt32(port) * 0x20, 8) else { return }
+                dir.append(g[0]); mask.append(g[4]); pins.append(g[5]); out.append(g[6])
+            }
+            (s.gpioDirection, s.gpioMask, s.gpioOutput, s.gpioPins) = (dir, mask, out, pins)
         }
     }
 

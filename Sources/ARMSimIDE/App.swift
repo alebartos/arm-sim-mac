@@ -218,6 +218,13 @@ enum SmokeTest {
                     after(0.5) {
                         say("printf output:\n" + d.printfOutput)
                         say(String(format: "cycles=%llu pc=0x%08X", d.snapshot.cycles, d.snapshot.r[15]))
+                        let sn = d.snapshot
+                        say(String(format: "peripherals: SysTick CSR 0x%X LOAD 0x%X VAL 0x%X, CFSR 0x%X HFSR 0x%X BFAR 0x%X", sn.sysTickCSR,
+                                   sn.sysTickReload, sn.sysTickCurrent, sn.cfsr, sn.hfsr, sn.bfar)
+                            + ", NVIC \(sn.nvic.count) entries, enabled \(sn.nvic.filter(\.enabled).map(\.number)), pending \(sn.nvic.filter(\.pending).map(\.number))"
+                            + ", priorities \(sn.nvic.filter { $0.priority != 0 }.map { "\($0.number):\($0.priority)" })"
+                            + ", GPIO dir \(sn.gpioDirection.map { String($0, radix: 16) }) pins \(sn.gpioPins.map { String($0, radix: 16) })"
+                            + ", LPC17xx windows \(d.hasLPC17xxRegisters)")
                         say("watch msTicks = \(d.evaluate("msTicks")?.text ?? "nil")")
                         if let dwarf = ws.lastProduct?.dwarf {
                             let pc = d.snapshot.r[15]

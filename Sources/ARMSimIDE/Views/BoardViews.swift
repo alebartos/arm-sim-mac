@@ -13,7 +13,7 @@ struct GPIOWindow: View {
 
     var body: some View {
         let s = debugger.snapshot
-        let available = debugger.lpc != nil && s.gpioPins.count == 5
+        let available = debugger.hasLPC17xxRegisters && s.gpioPins.count == 5
         VStack(alignment: .leading, spacing: 4) {
             if available {
                 GroupBox("GPIO\(port)") {
@@ -85,7 +85,7 @@ struct GPIOWindow: View {
                     .toolTip("Bit \(bit)")
                     // Pins row: only pins of the package; FIOnPIN: absent pins greyed, as µVision.
                     .opacity(offset == nil && !present ? 0 : 1)
-                    .disabled(!present && (offset == nil || offset == 0x14))
+                    .disabled(!present && (offset == nil || offset == 0x14) || offset == nil && debugger.remote != nil)   // real pins: not settable
                     .padding(.trailing, bit % 8 == 0 ? 6 : 0)
                 }
             }
@@ -482,7 +482,7 @@ struct TimerWindow: View {
     var body: some View {
         let _ = debugger.revision
         VStack(alignment: .leading, spacing: 6) {
-            if debugger.lpc == nil {
+            if !debugger.hasLPC17xxRegisters {
                 Text("Timer simulation is available for LPC17xx devices in a debug session.").foregroundColor(.secondary)
             } else {
                 HStack(alignment: .top, spacing: 6) {
