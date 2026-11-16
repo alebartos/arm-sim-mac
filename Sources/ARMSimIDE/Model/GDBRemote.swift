@@ -18,6 +18,8 @@ final class GDBRemote {
     private var noAck = false
     private var buffer: [UInt8] = []
     private(set) var packetSize = 4096
+    /// qSupported reply of the server.
+    private(set) var features = ""
     /// Register numbers by lower-case name ("r0".."pc", "xpsr", "msp", "psp", "primask", "control"...).
     private(set) var registerNumbers: [String: Int] = [:]
     /// Console output of the target or of monitor commands ('O' packets).
@@ -67,7 +69,7 @@ final class GDBRemote {
     var isConnected: Bool { fd >= 0 }
 
     private func handshake() throws {
-        let features = try request("qSupported:swbreak+;hwbreak+;xmlRegisters=arm")
+        features = try request("qSupported:swbreak+;hwbreak+;xmlRegisters=arm")
         for item in features.split(separator: ";") {
             if item.hasPrefix("PacketSize="), let n = Int(item.dropFirst("PacketSize=".count), radix: 16) { packetSize = max(n, 256) }
         }
@@ -129,6 +131,12 @@ final class GDBRemote {
     /// Sends a command and returns its reply (console 'O' packets are passed to `onOutput`).
     @discardableResult
     func request(_ command: String) throws -> String {
+        try request(bytes: Array(command.utf8))
+    }
+
+    /// A command with binary data (vFlashWrite, already escaped).
+    @discardableResult
+    func request(bytes command: [UInt8]) throws -> String {
         try send(command)
         while true {
             let reply = try receive()
@@ -191,6 +199,107 @@ final class GDBRemote {
         _ = try request("z0,\(String(address, radix: 16)),2")
     }
 
+    // MARK: Flash programming (vFlash packets: pyOCD, OpenOCD, J-Link GDB Server)
+
+    struct FlashRegion: Equatable {
+        let start: UInt32
+        let length: UInt32
+        let blockSize: UInt32
+        func contains(_ address: UInt32) -> Bool { address >= start && UInt64(address) < UInt64(start) + UInt64(length) }
+    }
+
+    /// Flash regions of the target's memory map (qXfer:memory-map:read).
+    func flashRegions() throws -> [FlashRegion] {
+        guard features.contains("qXfer:memory-map:read+") else {
+            throw Failure(description: "the GDB server does not report a memory map (no flash programming through GDB)")
+        }
+        return Self.flashRegions(memoryMap: try readXfer("memory-map", ""))
+    }
+
+    static func flashRegions(memoryMap xml: String) -> [FlashRegion] {
+        guard let regex = try? NSRegularExpression(pattern: #"<memory\s([^>]*?)(?:/>|>(.*?)</memory>)"#, options: [.dotMatchesLineSeparators]) else { return [] }
+        let ns = xml as NSString
+        func number(_ text: String) -> UInt32? {
+            let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return t.hasPrefix("0x") ? UInt32(t.dropFirst(2), radix: 16) : UInt32(t)
+        }
+        func attribute(_ name: String, _ attrs: String) -> String? {
+            guard let r = attrs.range(of: name + #"\s*=\s*"([^"]*)""#, options: .regularExpression) else { return nil }
+            let found = String(attrs[r])
+            return found.split(separator: "\"", omittingEmptySubsequences: false).dropFirst().first.map(String.init)
+        }
+        return regex.matches(in: xml, range: NSRange(location: 0, length: ns.length)).compactMap { m in
+            let attrs = ns.substring(with: m.range(at: 1))
+            let body = m.range(at: 2).location == NSNotFound ? "" : ns.substring(with: m.range(at: 2))
+            guard attribute("type", attrs) == "flash", let start = attribute("start", attrs).flatMap(number),
+                  let length = attribute("length", attrs).flatMap(number) else { return nil }
+            var block = length
+            if let r = body.range(of: #"name\s*=\s*"blocksize"\s*>([^<]*)<"#, options: .regularExpression) {
+                let text = body[r].split(separator: ">").dropFirst().first.map { String($0.dropLast()) } ?? ""
+                block = number(text) ?? length
+            }
+            return FlashRegion(start: start, length: length, blockSize: max(block, 1))
+        }
+    }
+
+    /// Erase ranges (block aligned, adjacent blocks merged) covering the bytes written in flash.
+    static func eraseRanges(_ segments: [(address: UInt32, bytes: [UInt8])], regions: [FlashRegion]) -> [(UInt32, UInt32)] {
+        var blocks = Set<UInt32>()
+        var sizes: [UInt32: UInt32] = [:]
+        for segment in segments where !segment.bytes.isEmpty {
+            var a = segment.address
+            let end = UInt64(segment.address) + UInt64(segment.bytes.count)
+            while UInt64(a) < end {
+                guard let region = regions.first(where: { $0.contains(a) }) else { a &+= 1; continue }
+                let block = region.start &+ (a &- region.start) / region.blockSize * region.blockSize
+                blocks.insert(block)
+                sizes[block] = region.blockSize
+                a = block &+ region.blockSize
+                if a == 0 { break }
+            }
+        }
+        var ranges: [(UInt32, UInt32)] = []
+        for block in blocks.sorted() {
+            let size = sizes[block]!
+            if let last = ranges.last, last.0 &+ last.1 == block { ranges[ranges.count - 1].1 += size } else { ranges.append((block, size)) }
+        }
+        return ranges
+    }
+
+    /// Programs the flash parts of the segments (erase, write, done) and writes the others with memory packets.
+    func loadFlash(_ segments: [(address: UInt32, bytes: [UInt8])], log: (String) -> Void) throws {
+        let regions = try flashRegions()
+        guard !regions.isEmpty else { throw Failure(description: "the target's memory map has no flash") }
+        let inFlash = segments.filter { s in regions.contains { $0.contains(s.address) } }
+        for (start, length) in Self.eraseRanges(inFlash, regions: regions) {
+            let reply = try request("vFlashErase:\(String(start, radix: 16)),\(String(length, radix: 16))")
+            guard reply == "OK" else { throw Failure(description: String(format: "flash erase at 0x%08X: %@", start, reply)) }
+        }
+        // Binary data: '#', '$', '}' and '*' escaped as '}' + (byte ^ 0x20); chunks stay well inside the packet size.
+        let chunk = max((packetSize - 64) / 2, 64)
+        for segment in inFlash {
+            var offset = 0
+            while offset < segment.bytes.count {
+                let part = segment.bytes[offset..<min(offset + chunk, segment.bytes.count)]
+                var payload = Array("vFlashWrite:\(String(segment.address &+ UInt32(offset), radix: 16)):".utf8)
+                for b in part {
+                    if b == 0x23 || b == 0x24 || b == 0x7D || b == 0x2A { payload += [0x7D, b ^ 0x20] } else { payload.append(b) }
+                }
+                let reply = try request(bytes: payload)
+                guard reply == "OK" else {
+                    throw Failure(description: String(format: "flash write at 0x%08X: %@", segment.address &+ UInt32(offset), reply))
+                }
+                offset += part.count
+            }
+        }
+        let done = try request("vFlashDone")
+        guard done == "OK" else { throw Failure(description: "flash programming: \(done)") }
+        log("Flash: \(inFlash.reduce(0) { $0 + $1.bytes.count }) bytes programmed")
+        for segment in segments where !regions.contains(where: { $0.contains(segment.address) }) && !segment.bytes.isEmpty {
+            try writeMemory(segment.address, segment.bytes)
+        }
+    }
+
     func step() throws -> Stop { try parseStop(request("s")) }
 
     /// Resumes and waits until the target stops (a breakpoint, or `interrupt()`).
@@ -231,8 +340,7 @@ final class GDBRemote {
 
     // MARK: Packets
 
-    private func send(_ payload: String) throws {
-        let body = Array(payload.utf8)
+    private func send(_ body: [UInt8]) throws {
         let checksum = body.reduce(UInt8(0)) { $0 &+ $1 }
         let packet = [UInt8(ascii: "$")] + body + [UInt8(ascii: "#")] + Array(String(format: "%02x", checksum).utf8)
         for _ in 0..<3 {

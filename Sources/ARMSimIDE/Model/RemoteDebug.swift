@@ -9,6 +9,9 @@ struct GDBServerSettings: Codable, Equatable {
         case memory
         /// `monitor program <axf> verify` then `monitor reset halt` (OpenOCD flash programming).
         case openOCD
+        /// vFlashErase / vFlashWrite / vFlashDone over the server's memory map, then `monitor reset halt`
+        /// (pyOCD, OpenOCD, J-Link GDB Server).
+        case flash
         /// The image is already on the target (or loaded by the server).
         case none
 
@@ -16,6 +19,7 @@ struct GDBServerSettings: Codable, Equatable {
             switch self {
             case .memory: return "Write memory (QEMU, RAM)"
             case .openOCD: return "OpenOCD: monitor program + reset halt"
+            case .flash: return "Flash through GDB (pyOCD, OpenOCD, J-Link) + reset halt"
             case .none: return "Do not load"
             }
         }
@@ -64,6 +68,11 @@ extension DebugController {
                 }
                 appendLog("Load \"\(product.axfURL.path)\" (\(product.image.segments.reduce(0) { $0 + $1.bytes.count }) bytes)")
                 try remoteResetRegisters(gdb)
+            case .flash:
+                appendLog("Load \"\(product.axfURL.path)\"")
+                let segments = product.image.segments.filter { !$0.bytes.isEmpty && !$0.isZeroInitialized }.map { (address: $0.address, bytes: $0.bytes) }
+                try gdb.loadFlash(segments) { appendLog($0) }
+                try remoteMonitorReset(gdb)
             case .none:
                 break
             }
@@ -96,11 +105,21 @@ extension DebugController {
         if gdb.registerNumbers["xpsr"] != nil { try? gdb.writeRegister("xpsr", 0x0100_0000) }   // Thumb bit
     }
 
+    /// `monitor reset halt` (pyOCD / OpenOCD); servers without it (J-Link: `monitor reset`) get that, else the
+    /// vector table reset.
+    private func remoteMonitorReset(_ gdb: GDBRemote) throws {
+        if (try? gdb.monitor("reset halt")) != nil { return }
+        if (try? gdb.monitor("reset")) != nil { return }
+        try remoteResetRegisters(gdb)
+    }
+
     func resetRemoteOnQueue() {
         guard let gdb = remote else { return }
         do {
             if remoteSettings?.load == .openOCD {
                 _ = try gdb.monitor("reset halt")
+            } else if remoteSettings?.load == .flash {
+                try remoteMonitorReset(gdb)
             } else {
                 try remoteResetRegisters(gdb)
             }

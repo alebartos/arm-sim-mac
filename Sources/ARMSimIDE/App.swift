@@ -203,7 +203,8 @@ enum SmokeTest {
         // ARMSIM_SMOKE_GDB=<host:port>: debug through that GDB server (e.g. QEMU -S -gdb tcp::1234), image written
         // with memory packets.
         if let server = env["ARMSIM_SMOKE_GDB"], let colon = server.lastIndex(of: ":"), let port = Int(server[server.index(after: colon)...]) {
-            GDBServerSettings(enabled: true, host: String(server[..<colon]), port: port, load: .memory).save(projectPath: ws.projectURL?.path)
+            GDBServerSettings(enabled: true, host: String(server[..<colon]), port: port,
+                              load: env["ARMSIM_SMOKE_GDB_LOAD"].flatMap(GDBServerSettings.Load.init(rawValue:)) ?? .memory).save(projectPath: ws.projectURL?.path)
         }
         ws.toggleDebugSession()
         after(4) {
