@@ -76,10 +76,10 @@ func compile(_ source: String, ext: String, profile: Profile, extraFlags: [Strin
 struct AsmTest {
     let name: String
     let body: String
-    /// Keys: r0...r12, lr, N Z C V Q, spDelta (SP after minus SP before).
+    /// Keys: r0...r12, lr, N Z C V Q, spDelta (SP after minus SP before), cycles (the final BKPT included: 1).
     let expect: [String: UInt32]
     var thumb1Only = false
-    /// Profiles: nil = all with Thumb-2 (M0 too when thumb1Only); "dsp" = M4/M4F; "fpu" = M4F.
+    /// Profiles: nil = all with Thumb-2 (M0 too when thumb1Only); "dsp" = M4/M4F; "fpu" = M4F; "m3" = M3 only.
     var only: String?
 }
 
@@ -529,6 +529,28 @@ let asmTests: [AsmTest] = [
         .word 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     """, expect: ["r4": 0x0001_0000, "r6": 0x4000_0000, "r5": 1, "spDelta": 0]),
 
+    AsmTest(name: "cycles: loop with taken BNE (1+P), LDR 2, pipelined LDR/STR 1", body: """
+        movs r0, #4
+    1:  subs r0, #1
+        bne 1b
+        ldr r1, =0x20001000
+        ldr r2, [r1]
+        str r2, [r1, #4]
+        nop
+    """, expect: ["cycles": 1 + 4 + 3 * 2 + 1 + 2 + 1 + 1 + 1 + 1]),
+
+    AsmTest(name: "cycles: BL / BX LR (1+P), PUSH/POP 1+N, MLA 2, UDIV early termination", body: """
+        movs r0, #100
+        movs r1, #7
+        bl 2f
+        mla r3, r0, r1, r0
+        b 3f
+    2:  push {r4, lr}
+        udiv r2, r0, r1
+        pop {r4, pc}
+    3:  nop
+    """, expect: ["r2": 14, "r3": 800, "cycles": 1 + 1 + 2 + (3 + 4 + (3 + 1)) + 2 + 2 + 1 + 1], only: "m3"),
+
     AsmTest(name: "LDM faulting on its last word leaves the registers unchanged (BusFault -> HardFault)", body: """
         ldr r0, =0xE000ED08
         ldr r1, =vectors
@@ -614,11 +636,13 @@ func runAsmTest(_ test: AsmTest, profile: Profile) throws -> String? {
     guard let start = image.symbol(named: "_start") else { return "no _start symbol" }
     try sim.prepareCall(address: start.address)
     let initialSP = sim.cpu.sp
+    let initialCycles = sim.cpu.cycles
     let reason = sim.cpu.run(maxInstructions: 100_000)
     guard case .bkpt(0, _) = reason else { return "stopped with \(reason)" }
     var problems: [String] = []
     for (key, expected) in test.expect.sorted(by: { $0.key < $1.key }) {
-        let actual = key == "spDelta" ? sim.cpu.sp &- initialSP : flagValue(sim.cpu, key)
+        let actual = key == "spDelta" ? sim.cpu.sp &- initialSP
+            : key == "cycles" ? UInt32(truncatingIfNeeded: sim.cpu.cycles &- initialCycles) : flagValue(sim.cpu, key)
         guard let actual else { problems.append("unknown key \(key)"); continue }
         if actual != expected {
             problems.append(String(format: "%@ = 0x%08X, expected 0x%08X", key, actual, expected))
@@ -1620,7 +1644,7 @@ func report(_ label: String, _ body: () throws -> String?) {
 print("== Assembly tests")
 for test in asmTests {
     for profile in profiles where test.only == "fpu" ? profile.fpu
-        : test.only == "dsp" ? profile.arch == .armv7em : (profile.arch != .armv6m || test.thumb1Only) {
+        : test.only == "dsp" ? profile.arch == .armv7em : test.only == "m3" ? profile.arch == .armv7m : (profile.arch != .armv6m || test.thumb1Only) {
         report("[\(profile.name)] \(test.name)") { try runAsmTest(test, profile: profile) }
     }
 }

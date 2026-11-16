@@ -145,6 +145,8 @@ public final class CPU {
     var curPC: UInt32 = 0
     var nextPC: UInt32 = 0
     var event: StepEvent = .none
+    /// The previous instruction was a load / store single (pipelining of the next one).
+    var previousLoadStore = false
 
     deinit {
         r.base.deallocate()
@@ -306,6 +308,7 @@ public final class CPU {
             }
         }
 
+        let before = cycles
         do {
             try executeInstruction()
         } catch let fault as CPUFault {
@@ -315,8 +318,9 @@ public final class CPU {
             try takeFault(fault)
             return event
         }
-        if system.sysTickCSR & 1 != 0 { system.tickSysTick(1) }
-        deviceDebt &+= 1
+        let elapsed = cycles &- before
+        if system.sysTickCSR & 1 != 0 { system.tickSysTick(elapsed) }
+        deviceDebt &+= elapsed
         if deviceDebt >= deviceHorizon { syncDevices() }
         return event
     }
@@ -390,8 +394,13 @@ public final class CPU {
         // No register backup for faults: every instruction does its memory accesses before writing registers
         // (loadMultiple buffers its loads), so a bus / alignment fault leaves them unchanged.
 
+        let executes = !inIT || conditionPassed(UInt32(itState >> 4))
+        // Cycle cost (Cortex-M3/M4 TRM instruction timings), from the encoding and the operands before execution.
+        var cost: UInt64 = 1
+        var loadStoreSingle = false
+        if executes && hw1 >= 0x4800 { (cost, loadStoreSingle) = instructionCycles(hw1, hw2) }   // below: 1-cycle ALU
         do {
-            if !inIT || conditionPassed(UInt32(itState >> 4)) {
+            if executes {
                 if is32 { try execute32(hw1, hw2) } else { try execute16(hw1) }
             }
         } catch let e as BusError {
@@ -419,7 +428,20 @@ public final class CPU {
                 coverageHigh[curPC, default: 0] &+= 1
             }
         }
-        cycles &+= 1
+        // Neighbouring load / store single instructions pipeline: the second one takes a single cycle (M3/M4).
+        if loadStoreSingle && previousLoadStore && arch != .armv6m { cost = 1 }
+        previousLoadStore = loadStoreSingle
+        // A taken branch (any write to the PC) refills the pipeline: P = 1, 2 when the target is a 32-bit
+        // instruction across a word boundary (Cortex-M0: always 2).
+        if _slowPath(nextPC != curPC &+ (is32 ? 4 : 2)) && pendingExceptionReturn == nil {
+            if arch == .armv6m {
+                cost &+= 2
+            } else {
+                cost &+= nextPC & 2 != 0 && ((try? memory.fetch16(nextPC & ~1)) ?? 0) >= 0xE800 ? 2 : 1
+            }
+            previousLoadStore = false
+        }
+        cycles &+= cost
         instructionCount &+= 1
         if let excReturn = pendingExceptionReturn {
             pendingExceptionReturn = nil
@@ -427,6 +449,76 @@ public final class CPU {
             event = .exceptionReturn(excReturn)
         } else {
             r[15] = nextPC
+        }
+    }
+
+    // MARK: Instruction timing
+
+    /// Cycles of an instruction that executes (without the pipeline refill of a taken branch), and whether it is a
+    /// load / store single (pipelined with a neighbouring one). Cortex-M3 TRM table 18-1; M4 single-cycle MAC.
+    @inline(__always)
+    func instructionCycles(_ hw1: UInt32, _ hw2: UInt32) -> (UInt64, Bool) {
+        if hw1 < 0xE800 {
+            switch hw1 >> 11 {
+            case 0...8: return (1, false)                       // shifts, add/sub/mov/cmp, data processing, hi regs, BX
+            case 0x09...0x13: return (2, true)                  // LDR literal, load / store single
+            case 0x16, 0x17:                                    // miscellaneous
+                switch hw1 & 0xFE00 {
+                case 0xB400, 0xBC00: return (1 + UInt64((hw1 & 0x1FF).nonzeroBitCount), false)   // PUSH / POP (+LR/PC)
+                default: return (1, false)
+                }
+            case 0x18, 0x19: return (1 + UInt64((hw1 & 0xFF).nonzeroBitCount), false)          // STM / LDM
+            default: return (1, false)                          // ADR, ADD SP, B<c>, SVC, B
+            }
+        }
+        let v6 = arch == .armv6m
+        switch hw1 & 0xFE00 {
+        case 0xE800:
+            if hw1 & 0x40 == 0 { return (1 + UInt64((hw2 & 0xFFFF).nonzeroBitCount), false) }       // LDM / STM
+            if hw1 & 0x120 != 0 { return (3, false) }                                             // LDRD / STRD
+            if hw1 & 0xFFF0 == 0xE8D0 && hw2 & 0xFFE0 == 0xF000 { return (2, false) }             // TBB / TBH
+            return (2, false)                                                                    // LDREX / STREX
+        case 0xF800: return (2, true)                                                           // load / store single
+        case 0xFA00:
+            guard hw1 & 0xFF00 == 0xFB00 else { return (1, false) }   // data processing (register)
+            // Multiply / divide.
+            let op1 = (hw1 >> 4) & 7
+            if hw1 & 0xFFF0 == 0xFB00 && hw2 & 0x00F0 == 0x0000 { return (hw2 >> 12 == 15 || arch == .armv7em ? 1 : 2, false) }   // MUL / MLA
+            if hw1 & 0xFFF0 == 0xFB00 && hw2 & 0x00F0 == 0x0010 { return (arch == .armv7em ? 1 : 2, false) }                      // MLS
+            if hw1 & 0xFF80 == 0xFB80 {
+                if op1 == 1 || op1 == 3 {                       // SDIV / UDIV: 2-12, early termination on the quotient size
+                    var n = R(hw1 & 0xF), d = R(hw2 & 0xF)
+                    if op1 == 1 {   // magnitudes
+                        n = UInt32(truncatingIfNeeded: abs(Int64(Int32(bitPattern: n))))
+                        d = UInt32(truncatingIfNeeded: abs(Int64(Int32(bitPattern: d))))
+                    }
+                    guard d != 0, n >= d else { return (2, false) }
+                    let bits = UInt64(d.leadingZeroBitCount - n.leadingZeroBitCount + 1)
+                    return (min(2 + (bits + 3) / 4, 12), false)
+                }
+                if arch == .armv7em { return (1, false) }       // M4: single-cycle long multiply / MAC
+                return (op1 == 0 || op1 == 2 ? 3 : 4, false)     // SMULL / UMULL 3-5, SMLAL / UMLAL 4-7 (minimum)
+            }
+            return (1, false)
+        case 0xEC00, 0xEE00:
+            guard !v6 else { return (1, false) }
+            // FPU (coprocessor 10/11).
+            if hw2 & 0x0E00 != 0x0A00 { return (1, false) }
+            if hw1 & 0xFE00 == 0xEC00 {
+                if hw1 & 0xFF00 == 0xED00 && hw1 & 0x20 == 0 && hw1 & 0xFFE0 != 0xEC40 { return (2, false) }   // VLDR / VSTR
+                if hw1 & 0xFFE0 == 0xEC40 { return (1, false) }                                               // VMOV 2 core regs
+                return (1 + UInt64(hw2 & 0xFF), false)                                                      // VLDM / VSTM / VPUSH / VPOP: 1 + words
+            }
+            let opc = hw1 & 0x00B0
+            if hw2 & 0x10 == 0 {
+                if opc == 0x0080 && hw2 & 0x40 == 0 { return (14, false) }                                    // VDIV
+                if hw1 & 0xFFBF == 0xEEB1 && hw2 & 0x0FD0 == 0x0AC0 { return (14, false) }                     // VSQRT
+                if opc == 0x0000 || opc == 0x0010 || opc == 0x00A0 || opc == 0x0090 { return (3, false) }     // VMLA/VMLS/VNMLA/VNMLS/VFMA/VFNMA
+            }
+            return (1, false)
+        default:
+            if v6 && hw1 & 0xF800 == 0xF000 && hw2 & 0xD000 == 0xD000 { return (2, false) }   // BL: 4 with the refill
+            return (1, false)                                   // data processing, B / BL, MSR / MRS, barriers
         }
     }
 
