@@ -83,7 +83,6 @@ public final class CPU {
 
     /// R0-R15. R13 is the active stack pointer, R15 the address of the next instruction.
     public let r = RegisterFile()
-    private let savedRegs = RegisterFile()
     public var n = false, z = false, c = false, v = false, q = false
     /// APSR.GE[3:0] (DSP extension).
     public var ge: UInt32 = 0
@@ -149,7 +148,6 @@ public final class CPU {
 
     deinit {
         r.base.deallocate()
-        savedRegs.base.deallocate()
     }
 
     public init(arch: Architecture = .armv7m, memory: MemoryMap) {
@@ -256,7 +254,7 @@ public final class CPU {
             let address = r[15]
             let result: StepEvent
             do {
-                result = try step()
+                result = try stepInline()
             } catch let fault as CPUFault {
                 return .fault(fault)
             } catch {
@@ -276,7 +274,10 @@ public final class CPU {
     /// Execute one instruction (or take one exception). Faults enter the fault handler
     /// unless `stopOnFault` is set or entry is impossible (then a CPUFault is thrown).
     @discardableResult
-    public func step() throws -> StepEvent {
+    public func step() throws -> StepEvent { try stepInline() }
+
+    @inline(__always)
+    private func stepInline() throws -> StepEvent {
         curPC = r[15]
         event = .none
 
@@ -369,6 +370,7 @@ public final class CPU {
         return best
     }
 
+    @inline(__always)
     private func executeInstruction() throws {
         var hw1: UInt32 = 0
         var hw2: UInt32 = 0
@@ -385,22 +387,20 @@ public final class CPU {
 
         let inIT = itState & 0xF != 0
         let isITInstruction = !is32 && hw1 & 0xFF00 == 0xBF00 && hw1 & 0xF != 0
-        // Register backup for faults (an in-place copy: `let saved = r` would allocate on every write).
-        savedRegs.base.update(from: r.base, count: 16)
+        // No register backup for faults: every instruction does its memory accesses before writing registers
+        // (loadMultiple buffers its loads), so a bus / alignment fault leaves them unchanged.
 
         do {
             if !inIT || conditionPassed(UInt32(itState >> 4)) {
                 if is32 { try execute32(hw1, hw2) } else { try execute16(hw1) }
             }
         } catch let e as BusError {
-            for i in 0..<16 { r[i] = savedRegs[i] }
             throw CPUFault.bus(e, pc: curPC)
         } catch is UndefinedInstruction {
             throw CPUFault.undefinedInstruction(pc: curPC, opcode: opcode)
         } catch let e as Unsupported {
             throw CPUFault.unsupported(pc: curPC, opcode: opcode, feature: e.feature)
         } catch let e as UnalignedAccess {
-            for i in 0..<16 { r[i] = savedRegs[i] }
             throw CPUFault.unaligned(pc: curPC, address: e.address)
         } catch let e as InvalidStateBranch {
             throw CPUFault.invalidState(pc: curPC, target: e.target)
@@ -538,12 +538,21 @@ public final class CPU {
         guard count > 0 else { throw UndefinedInstruction() }
         let base = R(rn)
         let start = increment ? base : base &- 4 &* count
-        var address = start
+        // All loads first, then the register writes: a fault leaves the registers unchanged (no per-instruction
+        // register backup is kept).
+        var values: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+                     UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         var newPC: UInt32?
-        for reg in UInt32(0)..<16 where list & (1 << reg) != 0 {
-            let value = try ld(address, 4, strict: true)
-            if reg == 15 { newPC = value } else { W(reg, value) }
-            address &+= 4
+        try withUnsafeMutableBytes(of: &values) { raw in
+            let buffer = raw.bindMemory(to: UInt32.self)
+            var address = start
+            for reg in 0..<16 where list & (1 << UInt32(reg)) != 0 {
+                buffer[reg] = try ld(address, 4, strict: true)
+                address &+= 4
+            }
+            for reg in 0..<16 where list & (1 << UInt32(reg)) != 0 {
+                if reg == 15 { newPC = buffer[reg] } else { W(UInt32(reg), buffer[reg]) }
+            }
         }
         if writeback && list & (1 << rn) == 0 { W(rn, increment ? base &+ 4 &* count : start) }
         if let target = newPC { try bxWritePC(target) }

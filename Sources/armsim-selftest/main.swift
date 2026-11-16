@@ -529,6 +529,32 @@ let asmTests: [AsmTest] = [
         .word 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     """, expect: ["r4": 0x0001_0000, "r6": 0x4000_0000, "r5": 1, "spDelta": 0]),
 
+    AsmTest(name: "LDM faulting on its last word leaves the registers unchanged (BusFault -> HardFault)", body: """
+        ldr r0, =0xE000ED08
+        ldr r1, =vectors
+        str r1, [r0]
+        movs r4, #0x11
+        movs r5, #0x11
+        movs r6, #0x11
+        ldr r0, =0x2003FFF8
+        ldm r0!, {r4, r5, r6}
+        mov r7, r0
+        bkpt #0
+        .global hardfault_handler2
+        .thumb_func
+    hardfault_handler2:
+        ldr r1, [sp, #24]
+        adds r1, #2
+        str r1, [sp, #24]
+        bx lr
+        .ltorg
+        .balign 128
+    vectors:
+        .word 0, 0, 0
+        .word hardfault_handler2
+        .word 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    """, expect: ["r4": 0x11, "r5": 0x11, "r6": 0x11, "r7": 0x2003_FFF8, "spDelta": 0], thumb1Only: true),
+
     AsmTest(name: "thread mode on PSP (EXC_RETURN 0xFFFFFFFD)", body: """
         ldr r0, =0xE000ED08
         ldr r1, =vectors
